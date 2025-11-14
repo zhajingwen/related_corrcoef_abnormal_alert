@@ -615,8 +615,6 @@ class SpuriousTEAnalyzer:
         # 如果是异常模式，输出详细的相关系数分析结果
         if print_status:
             # 格式化输出，使用分隔线使结果更清晰
-            # logger.info("\n" + "="*60)
-            # logger.info(f"{coin}相关系数分析结果")
             logger.info("="*60)
             content = f"{coin}相关系数分析结果\n{df_results.to_string(index=False)}\n"
             logger.info(content)
