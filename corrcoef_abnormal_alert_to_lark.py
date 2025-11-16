@@ -531,20 +531,36 @@ class SpuriousTEAnalyzer:
             for period in self.periods:
                 logger.info(f"正在下载 {coin} 的 {timeframe}、{period} 数据...")
                 
-                # 缓存BTC数据，避免重复下载（因为BTC数据对所有币种都相同）
-                cache_key = (timeframe, period)
-                if cache_key not in self.btc_df_cache:
-                    # 如果缓存中没有，下载BTC数据并存入缓存
-                    self.btc_df_cache[cache_key] = self.download_ccxt_data(
-                        self.btc_symbol, period=period, timeframe=timeframe
-                    )
-                
-                # 必须使用 .copy()，避免后续操作（如 loc 索引）修改缓存的数据
-                # 如果直接使用缓存数据，修改会影响后续币种的分析
-                btc_df = self.btc_df_cache[cache_key].copy()
-                
-                # 下载山寨币数据
-                alt_df = self.download_ccxt_data(coin, period=period, timeframe=timeframe)
+                try:
+                    # 缓存BTC数据，避免重复下载（因为BTC数据对所有币种都相同）
+                    cache_key = (timeframe, period)
+                    if cache_key not in self.btc_df_cache:
+                        # 如果缓存中没有，下载BTC数据并存入缓存
+                        try:
+                            self.btc_df_cache[cache_key] = self.download_ccxt_data(
+                                self.btc_symbol, period=period, timeframe=timeframe
+                            )
+                        except Exception as e:
+                            logger.error(f"  错误: 下载 {self.btc_symbol} 的 {timeframe}/{period} 数据失败: {type(e).__name__}: {str(e)}")
+                            logger.warning(f"  跳过 {coin} 的 {timeframe}/{period} 组合（BTC数据下载失败）")
+                            continue
+                    
+                    # 必须使用 .copy()，避免后续操作（如 loc 索引）修改缓存的数据
+                    # 如果直接使用缓存数据，修改会影响后续币种的分析
+                    btc_df = self.btc_df_cache[cache_key].copy()
+                    
+                    # 下载山寨币数据
+                    try:
+                        alt_df = self.download_ccxt_data(coin, period=period, timeframe=timeframe)
+                    except Exception as e:
+                        logger.error(f"  错误: 下载 {coin} 的 {timeframe}/{period} 数据失败: {type(e).__name__}: {str(e)}")
+                        logger.warning(f"  跳过 {coin} 的 {timeframe}/{period} 组合（数据下载失败）")
+                        continue
+                except Exception as e:
+                    # 捕获其他未预期的异常
+                    logger.error(f"  错误: 处理 {coin} 的 {timeframe}/{period} 数据时发生异常: {type(e).__name__}: {str(e)}")
+                    logger.warning(f"  跳过 {coin} 的 {timeframe}/{period} 组合")
+                    continue
                 
                 # 对齐时间索引：只保留BTC和山寨币都有的时间点
                 # 这样可以确保两个时间序列的时间一致
@@ -665,8 +681,16 @@ class SpuriousTEAnalyzer:
             if coin_item['quote'] != quote_currency:
                 continue  # 跳过不匹配的交易对
             
-            # 分析当前币种
-            self.one_coin_analysis(coin)
+            # 分析当前币种，添加错误处理以跳过失败的币种
+            try:
+                logger.info(f"开始分析币种: {coin}")
+                self.one_coin_analysis(coin)
+                logger.info(f"完成分析币种: {coin}")
+            except Exception as e:
+                # 捕获所有异常，记录错误但继续处理下一个币种
+                logger.error(f"分析币种 {coin} 时发生错误: {type(e).__name__}: {str(e)}")
+                logger.warning(f"跳过币种 {coin}，继续处理下一个币种...")
+                continue
             
             # 等待1秒，避免API请求过于频繁
             # 这有助于避免触发交易所的API速率限制
