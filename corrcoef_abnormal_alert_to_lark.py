@@ -699,7 +699,8 @@ class SpuriousTEAnalyzer:
 
 # ================== 运行 ==================
 if __name__ == "__main__":
+    exchange_name = "binance"
     # 创建分析器实例
-    analyzer = SpuriousTEAnalyzer()
+    analyzer = SpuriousTEAnalyzer(exchange_name=exchange_name)
     # 运行分析，分析所有USDT交易对
     analyzer.run()
