@@ -680,7 +680,9 @@ class SpuriousTEAnalyzer:
             # coin_item['quote']是计价货币，例如"USDT"、"BTC"等
             if coin_item['quote'] != quote_currency:
                 continue  # 跳过不匹配的交易对
-            
+            # 过滤合约
+            if '/USDT:USDT' in coin:
+                continue
             # 分析当前币种，添加错误处理以跳过失败的币种
             try:
                 logger.info(f"开始分析币种: {coin}")
