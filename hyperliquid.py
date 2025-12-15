@@ -62,7 +62,7 @@ class SpuriousTEAnalyzer:
             exchange: ccxt交易所实例，用于获取市场数据
             timeframes: 要分析的时间周期列表
             periods: 要分析的数据周期列表
-            btc_symbol: BTC交易对名称，固定为 "BTC/USDT"
+            btc_symbol: BTC交易对名称，固定为 "BTC/USDC"
             btc_df_cache: BTC数据缓存字典，避免重复下载相同的数据
                           key格式：(timeframe, period)，例如：("1m", "60d")
                           value: 对应的BTC DataFrame数据
@@ -74,7 +74,7 @@ class SpuriousTEAnalyzer:
         # 设置默认数据周期：1天、7天、30天、60天
         self.periods = default_periods or ["1d", "7d", "30d", "60d"]
         # BTC的交易对名称，作为基准货币
-        self.btc_symbol = "BTC/USDT"
+        self.btc_symbol = "BTC/USDC"
         # 缓存BTC各个颗粒度、各个周期级别的数据
         # 由于BTC数据对所有山寨币都相同，缓存可以大幅减少API调用次数
         self.btc_df_cache = {}  # 缓存字典，key为 (timeframe, period) 元组
@@ -129,7 +129,7 @@ class SpuriousTEAnalyzer:
         - 函数内部还有额外的5次重试机制，用于处理单次API调用失败
         
         Args:
-            symbol (str): 交易对名称，例如 "BTC/USDT"、"ETH/USDT"
+            symbol (str): 交易对名称，例如 "BTC/USDC"、"ETH/USDC"
             period (str): 数据周期，例如 "60d"（60天）
             timeframe (str): K线时间周期，例如 "5m"（5分钟K线）
         
@@ -225,7 +225,7 @@ class SpuriousTEAnalyzer:
         # fillna(0): 将NaN填充为0（第一个K线的收益率为0）
         df['return'] = df['Close'].pct_change().fillna(0)
         
-        # 计算美元成交量：成交量（基础货币） * 收盘价（USDT）
+        # 计算美元成交量：成交量（基础货币） * 收盘价（USDC）
         df['volume_usd'] = df['Volume'] * df['Close']
         
         return df
@@ -511,7 +511,7 @@ class SpuriousTEAnalyzer:
         - 表格包含：最大相关系数、时间周期、数据周期、最优延迟
         
         Args:
-            coin (str): 币种交易对名称，例如 "KCS/USDT"、"ETH/USDT"
+            coin (str): 币种交易对名称，例如 "KCS/USDC"、"ETH/USDC"
         
         处理流程：
         1. 遍历所有timeframe和period组合
@@ -608,7 +608,7 @@ class SpuriousTEAnalyzer:
         
         # 判断是否需要输出结果（是否为异常模式）
         print_status = False
-        
+        diff_amount = 0
         # 获取"最大相关系数"列的第一行和最后一行的值
         if len(df_results) > 0:
             first_max_corr = df_results.iloc[0]['最大相关系数']  # 最大相关系数（短期）
@@ -617,13 +617,11 @@ class SpuriousTEAnalyzer:
             # 异常模式1：第一行最大相关系数大于0.4，最后一行最大相关系数小于0.05
             # 这个数据状态表示1分钟级别的K线存在很大的滞后性，但是长期又表现出跟随的特性
             # 那这种就存在锚定BTC价格走势的时间差套利空间
-            if first_max_corr > 0.4 and last_max_corr < 0.2:
-                print_status = True
+            if first_max_corr > 0.6 and last_max_corr < 0.2:
+                diff_amount = first_max_corr - last_max_corr
+                if diff_amount > 0.5:
+                    print_status = True
             
-            # 异常模式2：第一行最大相关系数小于0.11，最后一行最大相关系数小于0.05
-            # 表示币种与BTC相关性极低，可能存在独立走势或异常行为
-            elif first_max_corr < 0.31 and last_max_corr < 0.2:
-                print_status = True
             else:
                 # 常规数据，不输出详细结果
                 logger.info(f'常规数据：{coin}')
@@ -632,25 +630,26 @@ class SpuriousTEAnalyzer:
         if print_status:
             # 格式化输出，使用分隔线使结果更清晰
             logger.info("="*60)
-            content = f"{coin}相关系数分析结果\n{df_results.to_string(index=False)}\n"
+            content = f"hyperliquid \n \n \n {coin}相关系数分析结果\n{df_results.to_string(index=False)}\n"
+            content += f"\n diff_amount: {diff_amount:.2f}"
             logger.info(content)
             sender(content, self.lark_hook)
             logger.info("="*60)
     
-    def run(self, quote_currency="USDT"):
+    def run(self, quote_currency="USDC"):
         """
         主运行方法，分析交易所中所有指定计价货币的交易对
         
         功能说明：
         1. 加载交易所的所有市场信息
-        2. 筛选出指定计价货币的交易对（默认USDT）
+        2. 筛选出指定计价货币的交易对（默认USDC）
         3. 对每个交易对进行分析，识别异常模式
         4. 在每次分析之间添加延迟，避免API请求过于频繁
         
         Args:
-            quote_currency (str): 计价货币，默认为 "USDT"
+            quote_currency (str): 计价货币，默认为 "USDC"
                                 只分析以该货币计价的交易对
-                                例如："USDT"会分析所有XXX/USDT交易对
+                                例如："USDC"会分析所有XXX/USDC交易对
         
         处理流程：
         1. 调用exchange.load_markets()加载所有市场信息
@@ -669,7 +668,7 @@ class SpuriousTEAnalyzer:
             - 如果交易所API有速率限制，可能需要调整sleep时间
         """
         # 加载交易所的所有市场信息
-        # 返回一个字典，key是交易对名称（如"BTC/USDT"），value是市场信息字典
+        # 返回一个字典，key是交易对名称（如"BTC/USDC"），value是市场信息字典
         all_coins = self.exchange.load_markets()
         
         # 遍历所有交易对
@@ -677,7 +676,7 @@ class SpuriousTEAnalyzer:
             coin_item = all_coins[coin]
             
             # 只分析指定计价货币的交易对
-            # coin_item['quote']是计价货币，例如"USDT"、"BTC"等
+            # coin_item['quote']是计价货币，例如"USDC"、"BTC"等
             if coin_item['quote'] != quote_currency:
                 continue  # 跳过不匹配的交易对
             # 过滤合约
@@ -701,8 +700,8 @@ class SpuriousTEAnalyzer:
 
 # ================== 运行 ==================
 if __name__ == "__main__":
-    exchange_name = "binance"
+    exchange_name = "hyperliquid"
     # 创建分析器实例
     analyzer = SpuriousTEAnalyzer(exchange_name=exchange_name)
-    # 运行分析，分析所有USDT交易对
+    # 运行分析，分析所有USDC交易对
     analyzer.run()

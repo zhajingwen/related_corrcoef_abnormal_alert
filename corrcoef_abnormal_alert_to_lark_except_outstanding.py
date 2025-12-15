@@ -608,7 +608,7 @@ class SpuriousTEAnalyzer:
         
         # 判断是否需要输出结果（是否为异常模式）
         print_status = False
-        
+        diff_amount = 0
         # 获取"最大相关系数"列的第一行和最后一行的值
         if len(df_results) > 0:
             first_max_corr = df_results.iloc[0]['最大相关系数']  # 最大相关系数（短期）
@@ -617,13 +617,20 @@ class SpuriousTEAnalyzer:
             # 异常模式1：第一行最大相关系数大于0.4，最后一行最大相关系数小于0.05
             # 这个数据状态表示1分钟级别的K线存在很大的滞后性，但是长期又表现出跟随的特性
             # 那这种就存在锚定BTC价格走势的时间差套利空间
-            if first_max_corr > 0.4 and last_max_corr < 0.2:
-                print_status = True
+            if first_max_corr > 0.6 and last_max_corr < 0.2:
+                diff_amount = first_max_corr - last_max_corr
+                if diff_amount > 0.5:
+                    print_status = True
             
-            # 异常模式2：第一行最大相关系数小于0.11，最后一行最大相关系数小于0.05
-            # 表示币种与BTC相关性极低，可能存在独立走势或异常行为
-            elif first_max_corr < 0.31 and last_max_corr < 0.2:
-                print_status = True
+
+
+            # # 异常模式2：第一行最大相关系数小于0.11，最后一行最大相关系数小于0.05
+            # # 表示币种与BTC相关性极低，可能存在独立走势或异常行为
+            # elif first_max_corr < 0.31 and last_max_corr < 0.2:
+            #     print_status = True
+
+
+            
             else:
                 # 常规数据，不输出详细结果
                 logger.info(f'常规数据：{coin}')
@@ -633,6 +640,7 @@ class SpuriousTEAnalyzer:
             # 格式化输出，使用分隔线使结果更清晰
             logger.info("="*60)
             content = f"{coin}相关系数分析结果\n{df_results.to_string(index=False)}\n"
+            content += f"\n diff_amount: {diff_amount:.2f}"
             logger.info(content)
             sender(content, self.lark_hook)
             logger.info("="*60)
