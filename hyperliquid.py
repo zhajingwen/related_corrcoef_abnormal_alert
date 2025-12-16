@@ -636,7 +636,7 @@ class SpuriousTEAnalyzer:
             sender(content, self.lark_hook)
             logger.info("="*60)
     
-    def run(self, quote_currency="USDC"):
+    def run(self):
         """
         主运行方法，分析交易所中所有指定计价货币的交易对
         
@@ -677,12 +677,8 @@ class SpuriousTEAnalyzer:
             
             logger.info(f"coin: {coin}, coin_item: {coin_item}")
             
-            # 只分析指定计价货币的交易对
-            # coin_item['quote']是计价货币，例如"USDC"、"BTC"等
-            if coin_item['quote'] != quote_currency:
-                continue  # 跳过不匹配的交易对
-            # 过滤合约
-            if '/USDT:USDT' in coin:
+            # 只考虑永续合约
+            if '/USDC:USDC' not in coin:
                 continue
             # 分析当前币种，添加错误处理以跳过失败的币种
             try:
