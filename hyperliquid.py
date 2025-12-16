@@ -675,6 +675,8 @@ class SpuriousTEAnalyzer:
         for coin in all_coins:
             coin_item = all_coins[coin]
             
+            logger.info(f"coin: {coin}, coin_item: {coin_item}")
+            
             # 只分析指定计价货币的交易对
             # coin_item['quote']是计价货币，例如"USDC"、"BTC"等
             if coin_item['quote'] != quote_currency:
