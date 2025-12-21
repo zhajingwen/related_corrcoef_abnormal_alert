@@ -32,6 +32,8 @@ class DelayCorrelationAnalyzer:
     
     注意：类名中的"TE"为历史遗留命名，实际使用皮尔逊相关系数而非传递熵。
     """
+    # 类常量：用于相关系数计算的最小数据点数量
+    MIN_DATA_POINTS_FOR_CORRELATION = 10
     
     def __init__(self, exchange_name="kucoin", timeout=30000, default_timeframes=None, default_periods=None):
         """
@@ -71,6 +73,8 @@ class DelayCorrelationAnalyzer:
         # 由于BTC数据对所有山寨币都相同，缓存可以大幅减少API调用次数
         self.btc_df_cache = {}  # 缓存字典，key为 (timeframe, period) 元组
         self.lark_hook = f'https://open.feishu.cn/open-apis/bot/v2/hook/{lark_bot_id}'
+        # 实例常量：用于数据验证的最小数据点数量
+        self.MIN_DATA_POINTS = 50
 
     
     @staticmethod
@@ -118,7 +122,6 @@ class DelayCorrelationAnalyzer:
         重试机制：
         - 使用@retry装饰器，最多重试10次
         - 每次重试间隔5秒，指数退避（backoff=2）
-        - 函数内部还有额外的5次重试机制，用于处理单次API调用失败
         
         Args:
             symbol (str): 交易对名称，例如 "BTC/USDC"、"ETH/USDC"
@@ -158,25 +161,10 @@ class DelayCorrelationAnalyzer:
         
         # 循环下载数据，直到获取足够的数据或没有更多数据
         while True:
-            # 带重试机制的OHLCV数据抓取
-            # 内部重试机制：最多尝试5次，每次失败后等待时间递增
-            last_exc = None
-            for attempt in range(5):
-                try:
-                    # 调用交易所API获取OHLCV数据
-                    # limit=1500：每次最多获取1500条K线（交易所API限制）
-                    ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=1500)
-                    last_exc = None
-                    break  # 成功获取数据，跳出重试循环
-                except Exception as e:
-                    # 记录异常，等待后重试
-                    last_exc = e
-                    # 指数退避：第1次等待1.5秒，第2次等待3秒，第3次等待4.5秒...
-                    time.sleep(1.5 * (attempt + 1))
-            
-            # 如果5次重试都失败，抛出最后一个异常
-            if last_exc is not None:
-                raise last_exc
+            # 调用交易所API获取OHLCV数据
+            # limit=1500：每次最多获取1500条K线（交易所API限制）
+            # 重试机制由@retry装饰器处理
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=1500)
             
             # 如果没有获取到数据，退出循环
             if not ohlcv:
@@ -287,9 +275,9 @@ class DelayCorrelationAnalyzer:
             # 确保两个数组长度一致（取最小值）
             m = min(len(x), len(y))
             
-            # 如果数据点太少（少于10个），无法计算可靠的相关系数
+            # 如果数据点太少，无法计算可靠的相关系数
             # 使用 np.nan 标记无效值（-1 是有效的相关系数值，表示完全负相关）
-            if m < 10:
+            if m < DelayCorrelationAnalyzer.MIN_DATA_POINTS_FOR_CORRELATION:
                 corrs.append(np.nan)
                 continue
             
@@ -320,35 +308,6 @@ class DelayCorrelationAnalyzer:
             max_related_matrix = np.nan
         
         return tau_star, corrs, max_related_matrix
-    
-    @staticmethod
-    def generate_signal(te_value, threshold=0.05):
-        """
-        根据指标值生成交易信号（预留功能，当前未使用）
-        
-        功能说明：
-        根据计算得到的指标值，判断是否触发套利信号。
-        如果指标值超过阈值，说明存在明显的信号，可能有机会进行延迟套利。
-        
-        注意：
-            此方法为预留功能，当前代码中未被调用。
-            参数名 te_value 为历史遗留命名，可接收任意数值指标。
-        
-        Args:
-            te_value (float): 指标值（参数名为历史遗留，可接收任意数值），范围[0, +∞)
-            threshold (float): 触发信号的阈值，默认0.05
-                              - 如果指标值 > threshold，生成"ENTER"信号
-                              - 如果指标值 <= threshold，生成"HOLD"信号
-        
-        Returns:
-            str: 交易信号字符串
-                - "ENTER: 延迟套利信号触发！": 指标值超过阈值，可能存在套利机会
-                - "HOLD: 虚假 TE 不足": 指标值未超过阈值，暂不操作
-        """
-        if te_value > threshold:
-            return "ENTER: 延迟套利信号触发！"
-        else:
-            return "HOLD: 虚假 TE 不足"
     
     def one_coin_analysis(self, coin: str):
         """
@@ -428,11 +387,8 @@ class DelayCorrelationAnalyzer:
                 common_idx = btc_df.index.intersection(alt_df.index)
                 btc_df, alt_df = btc_df.loc[common_idx], alt_df.loc[common_idx]
                 
-                # 最小数据点数量，用于进行可靠的相关性分析
-                MIN_DATA_POINTS = 50
-                
                 # 检查数据是否为空或数据量不足
-                if len(btc_df) < MIN_DATA_POINTS or len(alt_df) < MIN_DATA_POINTS:
+                if len(btc_df) < self.MIN_DATA_POINTS or len(alt_df) < self.MIN_DATA_POINTS:
                     logger.warning(f"  警告: {coin} 的 {timeframe}/{period} 数据量不足(BTC:{len(btc_df)}, ALT:{len(alt_df)})，跳过...")
                     continue
                 if 'return' not in btc_df.columns or 'return' not in alt_df.columns:
@@ -580,6 +536,6 @@ class DelayCorrelationAnalyzer:
 if __name__ == "__main__":
     exchange_name = "hyperliquid"
     # 创建分析器实例
-    analyzer = SpuriousTEAnalyzer(exchange_name=exchange_name)
+    analyzer = DelayCorrelationAnalyzer(exchange_name=exchange_name)
     # 运行分析，分析所有USDC交易对
     analyzer.run()
