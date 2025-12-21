@@ -6,8 +6,6 @@ import time
 import logging
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 from retry import retry
 from utils.lark_bot import sender
 from utils.config import lark_bot_id
@@ -26,7 +24,13 @@ class DelayCorrelationAnalyzer:
     
     识别短期低相关但长期高相关的异常币种，这类币种存在时间差套利机会。
     """
-    MIN_DATA_POINTS_FOR_CORRELATION = 10
+    # 相关系数计算所需的最小数据点数
+    MIN_POINTS_FOR_CORR_CALC = 10
+    
+    # 异常模式检测阈值
+    LONG_TERM_CORR_THRESHOLD = 0.6  # 长期相关系数阈值
+    SHORT_TERM_CORR_THRESHOLD = 0.3  # 短期相关系数阈值
+    CORR_DIFF_THRESHOLD = 0.5  # 相关系数差值阈值
     
     def __init__(self, exchange_name="kucoin", timeout=30000, default_timeframes=None, default_periods=None):
         """
@@ -45,7 +49,8 @@ class DelayCorrelationAnalyzer:
         self.btc_symbol = "BTC/USDC:USDC"
         self.btc_df_cache = {}
         self.lark_hook = f'https://open.feishu.cn/open-apis/bot/v2/hook/{lark_bot_id}'
-        self.MIN_DATA_POINTS = 50
+        # 数据分析所需的最小数据点数
+        self.MIN_DATA_POINTS_FOR_ANALYSIS = 50
 
     @staticmethod
     def _period_to_bars(period: str, timeframe: str) -> int:
@@ -149,7 +154,7 @@ class DelayCorrelationAnalyzer:
             
             m = min(len(x), len(y))
             
-            if m < DelayCorrelationAnalyzer.MIN_DATA_POINTS_FOR_CORRELATION:
+            if m < DelayCorrelationAnalyzer.MIN_POINTS_FOR_CORR_CALC:
                 corrs.append(np.nan)
                 continue
             
@@ -180,6 +185,61 @@ class DelayCorrelationAnalyzer:
             self.btc_df_cache[cache_key] = btc_df
         return self.btc_df_cache[cache_key].copy()
     
+    @staticmethod
+    def _safe_execute(func, *args, error_msg: str = None, **kwargs):
+        """
+        安全执行函数，统一错误处理
+        
+        Args:
+            func: 要执行的函数
+            *args: 函数的位置参数
+            error_msg: 自定义错误消息（可选）
+            **kwargs: 函数的关键字参数
+        
+        Returns:
+            函数返回值，如果发生异常返回 None
+        """
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if error_msg:
+                logger.error(f"{error_msg}: {type(e).__name__}: {str(e)}")
+            else:
+                logger.error(f"执行函数时发生异常: {type(e).__name__}: {str(e)}")
+            return None
+    
+    def _align_and_validate_data(self, btc_df: pd.DataFrame, alt_df: pd.DataFrame, 
+                                  coin: str, timeframe: str, period: str) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+        """
+        对齐和验证BTC与山寨币数据
+        
+        Args:
+            btc_df: BTC数据DataFrame
+            alt_df: 山寨币数据DataFrame
+            coin: 币种名称（用于日志）
+            timeframe: 时间周期
+            period: 数据周期
+        
+        Returns:
+            成功返回对齐后的 (btc_df, alt_df)，失败返回 None
+        """
+        # 对齐时间索引
+        common_idx = btc_df.index.intersection(alt_df.index)
+        btc_df_aligned = btc_df.loc[common_idx]
+        alt_df_aligned = alt_df.loc[common_idx]
+        
+        # 数据验证：检查数据量
+        if len(btc_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS or len(alt_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
+            logger.warning(f"{coin} 的 {timeframe}/{period} 数据量不足，跳过...")
+            return None
+        
+        # 数据验证：检查必要的列
+        if 'return' not in btc_df_aligned.columns or 'return' not in alt_df_aligned.columns:
+            logger.warning(f"{coin} 的 {timeframe}/{period} 数据缺少 'return' 列，跳过...")
+            return None
+        
+        return btc_df_aligned, alt_df_aligned
+    
     def _analyze_single_combination(self, coin: str, timeframe: str, period: str) -> tuple | None:
         """
         分析单个 timeframe/period 组合
@@ -199,21 +259,15 @@ class DelayCorrelationAnalyzer:
             logger.warning(f"跳过 {coin} 的 {timeframe}/{period} 组合（数据下载失败）")
             return None
         
-        # 对齐时间索引
-        common_idx = btc_df.index.intersection(alt_df.index)
-        btc_df, alt_df = btc_df.loc[common_idx], alt_df.loc[common_idx]
-        
-        # 数据验证
-        if len(btc_df) < self.MIN_DATA_POINTS or len(alt_df) < self.MIN_DATA_POINTS:
-            logger.warning(f"{coin} 的 {timeframe}/{period} 数据量不足，跳过...")
+        # 对齐和验证数据
+        aligned_data = self._align_and_validate_data(btc_df, alt_df, coin, timeframe, period)
+        if aligned_data is None:
             return None
-        if 'return' not in btc_df.columns or 'return' not in alt_df.columns:
-            logger.warning(f"{coin} 的 {timeframe}/{period} 数据缺少 'return' 列，跳过...")
-            return None
+        btc_df_aligned, alt_df_aligned = aligned_data
         
         tau_star, _, related_matrix = self.find_optimal_delay(
-            btc_df['return'].values, 
-            alt_df['return'].values
+            btc_df_aligned['return'].values, 
+            alt_df_aligned['return'].values
         )
         logger.info(f'timeframe: {timeframe}, period: {period}, tau_star: {tau_star}, max_related_matrix: {related_matrix}')
         
@@ -224,9 +278,9 @@ class DelayCorrelationAnalyzer:
         检测异常模式：短期低相关但长期高相关
         
         异常模式判断阈值：
-        - 长期相关系数 > 0.6：长期与BTC有较强跟随性
-        - 短期相关系数 < 0.3：短期存在明显滞后
-        - 差值 > 0.5：短期和长期差异足够显著
+        - 长期相关系数 > LONG_TERM_CORR_THRESHOLD：长期与BTC有较强跟随性
+        - 短期相关系数 < SHORT_TERM_CORR_THRESHOLD：短期存在明显滞后
+        - 差值 > CORR_DIFF_THRESHOLD：短期和长期差异足够显著
         
         Returns:
             (is_anomaly, diff_amount): 是否异常模式、相关系数差值
@@ -244,9 +298,9 @@ class DelayCorrelationAnalyzer:
         max_long_corr = max(long_term_corrs)
         logger.info(f'min_short_corr: {min_short_corr}, max_long_corr: {max_long_corr}')
         
-        if max_long_corr > 0.6 and min_short_corr < 0.3:
+        if max_long_corr > self.LONG_TERM_CORR_THRESHOLD and min_short_corr < self.SHORT_TERM_CORR_THRESHOLD:
             diff_amount = max_long_corr - min_short_corr
-            if diff_amount > 0.5:
+            if diff_amount > self.CORR_DIFF_THRESHOLD:
                 return True, diff_amount
             # 短期存在明显滞后时也触发
             if any(tau_star > 0 for _, _, period, tau_star in results if period == '1d'):
@@ -279,13 +333,13 @@ class DelayCorrelationAnalyzer:
         
         for timeframe in self.timeframes:
             for period in self.periods:
-                try:
-                    result = self._analyze_single_combination(coin, timeframe, period)
-                    if result is not None:
-                        results.append(result)
-                except Exception as e:
-                    logger.error(f"处理 {coin} 的 {timeframe}/{period} 时发生异常: {type(e).__name__}: {str(e)}")
-                    continue
+                result = self._safe_execute(
+                    self._analyze_single_combination,
+                    coin, timeframe, period,
+                    error_msg=f"处理 {coin} 的 {timeframe}/{period} 时发生异常"
+                )
+                if result is not None:
+                    results.append(result)
         
         # 过滤 NaN 并按相关系数降序排序
         valid_results = [(corr, tf, p, ts) for corr, tf, p, ts in results if not np.isnan(corr)]
@@ -312,13 +366,13 @@ class DelayCorrelationAnalyzer:
             if '/USDC:USDC' not in coin:
                 continue
             
-            try:
-                logger.info(f"开始分析币种: {coin}")
-                self.one_coin_analysis(coin)
-                logger.info(f"完成分析币种: {coin}")
-            except Exception as e:
-                logger.error(f"分析币种 {coin} 时发生错误: {type(e).__name__}: {str(e)}")
-                continue
+            logger.info(f"开始分析币种: {coin}")
+            self._safe_execute(
+                self.one_coin_analysis,
+                coin,
+                error_msg=f"分析币种 {coin} 时发生错误"
+            )
+            logger.info(f"完成分析币种: {coin}")
             
             time.sleep(1)
 
