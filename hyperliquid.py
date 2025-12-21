@@ -203,9 +203,9 @@ class DelayCorrelationAnalyzer:
             return func(*args, **kwargs)
         except Exception as e:
             if error_msg:
-                logger.error(f"{error_msg}: {type(e).__name__}: {str(e)}")
+                logger.error(f"{error_msg} | {type(e).__name__}: {str(e)}", exc_info=True)
             else:
-                logger.error(f"执行函数时发生异常: {type(e).__name__}: {str(e)}")
+                logger.exception("执行函数时发生异常")
             return None
     
     def _align_and_validate_data(self, btc_df: pd.DataFrame, alt_df: pd.DataFrame, 
@@ -230,7 +230,7 @@ class DelayCorrelationAnalyzer:
         
         # 数据验证：检查数据量
         if len(btc_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS or len(alt_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
-            logger.warning(f"{coin} 的 {timeframe}/{period} 数据量不足，跳过...")
+            logger.warning(f"数据量不足，跳过 | 币种: {coin} | {timeframe}/{period}")
             return None
         
         return btc_df_aligned, alt_df_aligned
@@ -242,16 +242,16 @@ class DelayCorrelationAnalyzer:
         Returns:
             成功返回 (correlation, timeframe, period, tau_star)，失败返回 None
         """
-        logger.info(f"正在下载 {coin} 的 {timeframe}、{period} 数据...")
+        logger.debug(f"下载数据 | 币种: {coin} | {timeframe}/{period}")
         
         btc_df = self._get_btc_data(timeframe, period)
         if btc_df is None:
-            logger.warning(f"跳过 {coin} 的 {timeframe}/{period} 组合（BTC数据下载失败）")
+            logger.warning(f"BTC数据下载失败，跳过 | 币种: {coin} | {timeframe}/{period}")
             return None
         
         alt_df = self._safe_download(coin, period, timeframe, coin)
         if alt_df is None:
-            logger.warning(f"跳过 {coin} 的 {timeframe}/{period} 组合（数据下载失败）")
+            logger.warning(f"币种数据下载失败，跳过 | 币种: {coin} | {timeframe}/{period}")
             return None
         
         # 对齐和验证数据
@@ -264,7 +264,7 @@ class DelayCorrelationAnalyzer:
             btc_df_aligned['return'].values, 
             alt_df_aligned['return'].values
         )
-        logger.info(f'timeframe: {timeframe}, period: {period}, tau_star: {tau_star}, max_related_matrix: {related_matrix}')
+        logger.debug(f"分析结果 | timeframe: {timeframe} | period: {period} | tau_star: {tau_star} | 相关系数: {related_matrix:.4f}")
         
         return (related_matrix, timeframe, period, tau_star)
     
@@ -291,7 +291,7 @@ class DelayCorrelationAnalyzer:
         
         min_short_corr = min(short_term_corrs)
         max_long_corr = max(long_term_corrs)
-        logger.info(f'min_short_corr: {min_short_corr}, max_long_corr: {max_long_corr}')
+        logger.debug(f"相关系数检测 | 短期最小: {min_short_corr:.4f} | 长期最大: {max_long_corr:.4f}")
         
         if max_long_corr > self.LONG_TERM_CORR_THRESHOLD and min_short_corr < self.SHORT_TERM_CORR_THRESHOLD:
             diff_amount = max_long_corr - min_short_corr
@@ -310,19 +310,23 @@ class DelayCorrelationAnalyzer:
             for corr, tf, p, ts in results
         ])
         
-        logger.info("=" * 60)
-        content = f"{self.exchange_name} \n \n \n {coin}相关系数分析结果\n{df_results.to_string(index=False)}\n"
-        content += f"\n diff_amount: {diff_amount:.2f}"
-        logger.info(content)
+        logger.info(f"发现异常币种 | 交易所: {self.exchange_name} | 币种: {coin} | 差值: {diff_amount:.2f}")
+        
+        # 飞书消息内容
+        content = f"{self.exchange_name}\n\n{coin} 相关系数分析结果\n{df_results.to_string(index=False)}\n"
+        content += f"\n差值: {diff_amount:.2f}"
+        logger.debug(f"详细分析结果:\n{df_results.to_string(index=False)}")
         sender(content, self.lark_hook)
-        logger.info("=" * 60)
     
-    def one_coin_analysis(self, coin: str):
+    def one_coin_analysis(self, coin: str) -> bool:
         """
         分析单个币种与BTC的相关系数，识别异常模式
         
         Args:
             coin: 币种交易对名称，如 "ETH/USDC:USDC"
+        
+        Returns:
+            是否发现异常模式
         """
         results = []
         
@@ -341,35 +345,51 @@ class DelayCorrelationAnalyzer:
         valid_results = sorted(valid_results, key=lambda x: x[0], reverse=True)
         
         if not valid_results:
-            logger.warning(f'数据不足，无法分析：{coin}')
-            return
+            logger.warning(f"数据不足，无法分析 | 币种: {coin}")
+            return False
         
         is_anomaly, diff_amount = self._detect_anomaly_pattern(valid_results)
         
         if is_anomaly:
             self._output_results(coin, valid_results, diff_amount)
+            return True
         else:
-            logger.info(f'常规数据：{coin}')
+            logger.debug(f"常规数据 | 币种: {coin}")
+            return False
     
     def run(self):
         """分析交易所中所有USDC永续合约交易对"""
-        all_coins = self.exchange.load_markets()
+        logger.info(f"启动分析器 | 交易所: {self.exchange_name} | "
+                    f"时间周期: {self.timeframes} | 数据周期: {self.periods}")
         
-        for coin in all_coins:
-            logger.info(f"coin: {coin}, coin_item: {all_coins[coin]}")
+        all_coins = self.exchange.load_markets()
+        usdc_coins = [c for c in all_coins if '/USDC:USDC' in c]
+        total = len(usdc_coins)
+        anomaly_count = 0
+        start_time = time.time()
+        
+        logger.info(f"发现 {total} 个 USDC 永续合约交易对")
+        
+        for idx, coin in enumerate(usdc_coins, 1):
+            logger.debug(f"检查币种: {coin}")
             
-            if '/USDC:USDC' not in coin:
-                continue
-            
-            logger.info(f"开始分析币种: {coin}")
-            self._safe_execute(
+            result = self._safe_execute(
                 self.one_coin_analysis,
                 coin,
                 error_msg=f"分析币种 {coin} 时发生错误"
             )
-            logger.info(f"完成分析币种: {coin}")
+            if result:
+                anomaly_count += 1
+            
+            # 每10个币种或最后一个币种打印进度
+            if idx % 10 == 0 or idx == total:
+                logger.info(f"分析进度: {idx}/{total}")
             
             time.sleep(1)
+        
+        elapsed = time.time() - start_time
+        logger.info(f"分析完成 | 共 {total} 个币种 | "
+                    f"发现 {anomaly_count} 个异常 | 耗时 {elapsed:.1f}s")
 
 
 if __name__ == "__main__":
