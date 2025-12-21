@@ -4,18 +4,50 @@
 import ccxt
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 import numpy as np
 import pandas as pd
 from retry import retry
 from utils.lark_bot import sender
 from utils.config import lark_bot_id
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+
+def setup_logging(log_file="hyperliquid.log", level=logging.INFO):
+    """
+    配置日志系统，支持控制台和文件输出
+    
+    Args:
+        log_file: 日志文件路径
+        level: 日志级别
+    
+    Returns:
+        配置好的 logger 实例
+    """
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # 控制台处理器
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    
+    # 文件处理器（10MB轮转，保留5个备份）
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'
+    )
+    file_handler.setFormatter(formatter)
+    
+    # 配置 logger
+    log = logging.getLogger(__name__)
+    log.setLevel(level)
+    log.addHandler(console_handler)
+    log.addHandler(file_handler)
+    
+    return log
+
+
+logger = setup_logging()
 
 
 class DelayCorrelationAnalyzer:
@@ -80,7 +112,7 @@ class DelayCorrelationAnalyzer:
             error_msg=f"下载 {display_name} 的 {timeframe}/{period} 数据失败"
         )
     
-    @retry(tries=10, delay=5, backoff=2)
+    @retry(tries=10, delay=5, backoff=2, logger=logger)
     def download_ccxt_data(self, symbol: str, period: str, timeframe: str) -> pd.DataFrame:
         """
         从交易所下载OHLCV历史数据
@@ -178,15 +210,19 @@ class DelayCorrelationAnalyzer:
     def _get_btc_data(self, timeframe: str, period: str) -> pd.DataFrame | None:
         """获取BTC数据（带缓存）"""
         cache_key = (timeframe, period)
-        if cache_key not in self.btc_df_cache:
-            btc_df = self._safe_download(self.btc_symbol, period, timeframe)
-            if btc_df is None:
-                return None
-            self.btc_df_cache[cache_key] = btc_df
-        return self.btc_df_cache[cache_key].copy()
+        if cache_key in self.btc_df_cache:
+            logger.debug(f"BTC数据缓存命中 | {timeframe}/{period}")
+            return self.btc_df_cache[cache_key].copy()
+        
+        logger.debug(f"BTC数据缓存未命中，开始下载 | {timeframe}/{period}")
+        btc_df = self._safe_download(self.btc_symbol, period, timeframe)
+        if btc_df is None:
+            return None
+        self.btc_df_cache[cache_key] = btc_df
+        return btc_df.copy()
     
     @staticmethod
-    def _safe_execute(func, *args, error_msg: str = None, **kwargs):
+    def _safe_execute(func, *args, error_msg: str = None, log_error: bool = True, **kwargs):
         """
         安全执行函数，统一错误处理
         
@@ -194,6 +230,7 @@ class DelayCorrelationAnalyzer:
             func: 要执行的函数
             *args: 函数的位置参数
             error_msg: 自定义错误消息（可选）
+            log_error: 是否记录错误日志（默认True）
             **kwargs: 函数的关键字参数
         
         Returns:
@@ -202,10 +239,8 @@ class DelayCorrelationAnalyzer:
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            if error_msg:
-                logger.error(f"{error_msg} | {type(e).__name__}: {str(e)}", exc_info=True)
-            else:
-                logger.exception("执行函数时发生异常")
+            if log_error and error_msg:
+                logger.warning(f"{error_msg} | {type(e).__name__}: {str(e)}")
             return None
     
     def _align_and_validate_data(self, btc_df: pd.DataFrame, alt_df: pd.DataFrame, 
@@ -246,12 +281,10 @@ class DelayCorrelationAnalyzer:
         
         btc_df = self._get_btc_data(timeframe, period)
         if btc_df is None:
-            logger.warning(f"BTC数据下载失败，跳过 | 币种: {coin} | {timeframe}/{period}")
             return None
         
         alt_df = self._safe_download(coin, period, timeframe, coin)
         if alt_df is None:
-            logger.warning(f"币种数据下载失败，跳过 | 币种: {coin} | {timeframe}/{period}")
             return None
         
         # 对齐和验证数据
@@ -366,9 +399,13 @@ class DelayCorrelationAnalyzer:
         usdc_coins = [c for c in all_coins if '/USDC:USDC' in c]
         total = len(usdc_coins)
         anomaly_count = 0
+        skip_count = 0
         start_time = time.time()
         
         logger.info(f"发现 {total} 个 USDC 永续合约交易对")
+        
+        # 进度里程碑：25%, 50%, 75%, 100%
+        milestones = {max(1, int(total * p)) for p in [0.25, 0.5, 0.75, 1.0]}
         
         for idx, coin in enumerate(usdc_coins, 1):
             logger.debug(f"检查币种: {coin}")
@@ -378,18 +415,23 @@ class DelayCorrelationAnalyzer:
                 coin,
                 error_msg=f"分析币种 {coin} 时发生错误"
             )
-            if result:
+            if result is True:
                 anomaly_count += 1
+            elif result is None:
+                skip_count += 1
             
-            # 每10个币种或最后一个币种打印进度
-            if idx % 10 == 0 or idx == total:
-                logger.info(f"分析进度: {idx}/{total}")
+            # 在里程碑位置打印进度
+            if idx in milestones:
+                logger.info(f"分析进度: {idx}/{total} ({idx * 100 // total}%)")
             
             time.sleep(1)
         
         elapsed = time.time() - start_time
-        logger.info(f"分析完成 | 共 {total} 个币种 | "
-                    f"发现 {anomaly_count} 个异常 | 耗时 {elapsed:.1f}s")
+        logger.info(
+            f"分析完成 | 交易所: {self.exchange_name} | "
+            f"总数: {total} | 异常: {anomaly_count} | 跳过: {skip_count} | "
+            f"耗时: {elapsed:.1f}s | 平均: {elapsed/total:.2f}s/币种"
+        )
 
 
 if __name__ == "__main__":
