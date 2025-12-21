@@ -1,6 +1,6 @@
 # 功能：分析山寨币与BTC的皮尔逊相关系数，识别存在时间差套利空间的异常币种
-# 原理：通过计算不同时间周期和延迟下的相关系数，找出短期低相关但长期高相关的币种
-#       这类币种短期存在较大滞后性，但长期跟随BTC走势，存在时间差套利机会
+# 原理：通过计算不同时间周期和延迟下的相关系数，找出短期高相关但长期低相关的币种
+#       这类币种存在锚定BTC价格走势的时间差套利机会
 
 import ccxt  # 加密货币交易所API库
 import time
@@ -25,12 +25,6 @@ logger = logging.getLogger(__name__)
 
 class SpuriousTEAnalyzer:
     """
-    山寨币与BTC相关系数分析器
-    
-    功能：分析山寨币与BTC在不同时间周期下的皮尔逊相关系数，
-    识别短期低相关但长期高相关的异常币种，这类币种存在时间差套利机会。
-    
-    注意：类名中的"TE"为历史遗留命名，实际使用皮尔逊相关系数而非传递熵。
     """
     
     def __init__(self, exchange_name="kucoin", timeout=30000, default_timeframes=None, default_periods=None):
@@ -52,7 +46,7 @@ class SpuriousTEAnalyzer:
             exchange: ccxt交易所实例，用于获取市场数据
             timeframes: 要分析的时间周期列表
             periods: 要分析的数据周期列表
-            btc_symbol: BTC交易对名称，固定为 "BTC/USDC:USDC"（永续合约格式）
+            btc_symbol: BTC交易对名称，固定为 "BTC/USDC"
             btc_df_cache: BTC数据缓存字典，避免重复下载相同的数据
                           key格式：(timeframe, period)，例如：("1m", "60d")
                           value: 对应的BTC DataFrame数据
@@ -324,26 +318,25 @@ class SpuriousTEAnalyzer:
     @staticmethod
     def generate_signal(te_value, threshold=0.05):
         """
-        根据指标值生成交易信号（预留功能，当前未使用）
+        根据传递熵值生成交易信号
         
         功能说明：
-        根据计算得到的指标值，判断是否触发套利信号。
-        如果指标值超过阈值，说明存在明显的信号，可能有机会进行延迟套利。
-        
-        注意：
-            此方法为预留功能，当前代码中未被调用。
-            参数名 te_value 为历史遗留命名，可接收任意数值指标。
+        根据计算得到的传递熵（TE）值，判断是否触发套利信号。
+        如果TE值超过阈值，说明存在明显的信息传递，可能有机会进行延迟套利。
         
         Args:
-            te_value (float): 指标值（参数名为历史遗留，可接收任意数值），范围[0, +∞)
+            te_value (float): 传递熵值，范围[0, +∞)
             threshold (float): 触发信号的阈值，默认0.05
-                              - 如果指标值 > threshold，生成"ENTER"信号
-                              - 如果指标值 <= threshold，生成"HOLD"信号
+                              - 如果TE值 > threshold，生成"ENTER"信号
+                              - 如果TE值 <= threshold，生成"HOLD"信号
         
         Returns:
             str: 交易信号字符串
-                - "ENTER: 延迟套利信号触发！": 指标值超过阈值，可能存在套利机会
-                - "HOLD: 虚假 TE 不足": 指标值未超过阈值，暂不操作
+                - "ENTER: 延迟套利信号触发！": TE值超过阈值，可能存在套利机会
+                - "HOLD: 虚假 TE 不足": TE值未超过阈值，暂不操作
+        
+        注意：
+            当前代码中此方法未被调用，可能是预留功能或未来扩展使用
         """
         if te_value > threshold:
             return "ENTER: 延迟套利信号触发！"
@@ -490,10 +483,6 @@ class SpuriousTEAnalyzer:
             # 异常模式：短期低相关但长期高相关
             # 这个数据状态表示短期K线存在很大的滞后性，但是长期相关性较强
             # 那这种就存在锚定BTC价格走势的时间差套利空间
-            # 异常模式判断阈值（基于经验设定）：
-            # - 长期相关系数 > 0.6：表示长期与BTC有较强的跟随性
-            # - 短期相关系数 < 0.3：表示短期存在明显滞后
-            # - 差值 > 0.5：确保短期和长期差异足够显著
             if max_long_corr > 0.6 and max_short_corr < 0.3:
                 diff_amount = max_long_corr - max_short_corr
                 if diff_amount > 0.5:
@@ -504,10 +493,6 @@ class SpuriousTEAnalyzer:
         else:
             # 数据不足，无法判断
             logger.warning(f'数据不足，无法判断异常模式：{coin} (短期数据: {len(short_term_corrs)}, 长期数据: {len(long_term_corrs)})')
-        
-        # 新增条件：当 '1d' period 的 tau_star 大于0时，也设置 print_status = True
-        if any(tau_star > 0 for _, _, period, tau_star in related_matrix_list if period == '1d'):
-            print_status = True
         
         # 如果是异常模式，输出详细的相关系数分析结果
         if print_status:
