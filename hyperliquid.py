@@ -476,15 +476,15 @@ class SpuriousTEAnalyzer:
         long_term_corrs = [x[0] for x in related_matrix_list if x[2] in long_periods]
         
         if short_term_corrs and long_term_corrs:
-            max_short_corr = max(short_term_corrs)  # 短期最大相关系数
+            min_short_corr = min(short_term_corrs)  # 短期最大相关系数
             max_long_corr = max(long_term_corrs)    # 长期最大相关系数
-            logger.info(f'max_short_corr: {max_short_corr}, max_long_corr: {max_long_corr}')
+            logger.info(f'min_short_corr: {min_short_corr}, max_long_corr: {max_long_corr}')
             
             # 异常模式：短期低相关但长期高相关
             # 这个数据状态表示短期K线存在很大的滞后性，但是长期相关性较强
             # 那这种就存在锚定BTC价格走势的时间差套利空间
-            if max_long_corr > 0.6 and max_short_corr < 0.3:
-                diff_amount = max_long_corr - max_short_corr
+            if max_long_corr > 0.6 and min_short_corr < 0.3:
+                diff_amount = max_long_corr - min_short_corr
                 if diff_amount > 0.5:
                     print_status = True
             else:
