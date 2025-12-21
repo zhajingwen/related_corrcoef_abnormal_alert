@@ -180,9 +180,9 @@ class SpuriousTEAnalyzer:
             all_rows.extend(ohlcv)
             fetched += len(ohlcv)
             
-            # 更新起始时间戳：使用最后一条K线的时间戳 + 1根K线的时长
-            # 这样下次请求会从下一条K线开始
-            since = ohlcv[-1][0] + ms_per_bar
+            # 更新起始时间戳：使用最后一条K线的时间戳 + 1毫秒
+            # 避免因数据间隙导致的数据遗漏问题（原来用 ms_per_bar 可能跳过间隙中的数据）
+            since = ohlcv[-1][0] + 1
             
             # 如果获取的数据少于1500条（说明已经到历史数据边界）
             # 或者已经获取了足够的数据，则退出循环
@@ -282,9 +282,9 @@ class SpuriousTEAnalyzer:
             m = min(len(x), len(y))
             
             # 如果数据点太少（少于10个），无法计算可靠的相关系数
-            # 将相关系数设为-1（无效值）
+            # 使用 np.nan 标记无效值（-1 是有效的相关系数值，表示完全负相关）
             if m < 10:
-                corrs.append(-1)
+                corrs.append(np.nan)
                 continue
             
             # 计算皮尔逊相关系数
@@ -293,12 +293,25 @@ class SpuriousTEAnalyzer:
             #  [corr(y,x), corr(y,y)]]
             # [0,1]位置就是x和y的相关系数
             related_matrix = np.corrcoef(x[:m], y[:m])[0, 1]
-            corrs.append(related_matrix)
+            # 检查是否返回 NaN（当输入数据标准差为0时会发生）
+            if np.isnan(related_matrix):
+                corrs.append(np.nan)
+            else:
+                corrs.append(related_matrix)
         
         # 找出使相关系数最大的延迟值（最优延迟）
-        tau_star = lags[np.argmax(corrs)]
-        # 获取最大相关系数值
-        max_related_matrix = max(corrs)
+        # 需要排除 NaN 值
+        valid_corrs = np.array(corrs)
+        valid_mask = ~np.isnan(valid_corrs)
+        if valid_mask.any():
+            valid_indices = np.where(valid_mask)[0]
+            best_idx = valid_indices[np.argmax(valid_corrs[valid_mask])]
+            tau_star = lags[best_idx]
+            max_related_matrix = valid_corrs[best_idx]
+        else:
+            # 所有延迟的相关系数都无效
+            tau_star = 0
+            max_related_matrix = np.nan
         
         return tau_star, corrs, max_related_matrix
     
@@ -407,9 +420,12 @@ class SpuriousTEAnalyzer:
                 common_idx = btc_df.index.intersection(alt_df.index)
                 btc_df, alt_df = btc_df.loc[common_idx], alt_df.loc[common_idx]
                 
-                # 检查数据是否为空或缺少必要的列
-                if len(btc_df) == 0 or len(alt_df) == 0:
-                    logger.warning(f"  警告: {coin} 的 {timeframe}/{period} 数据为空，跳过...")
+                # 最小数据点数量，用于进行可靠的相关性分析
+                MIN_DATA_POINTS = 50
+                
+                # 检查数据是否为空或数据量不足
+                if len(btc_df) < MIN_DATA_POINTS or len(alt_df) < MIN_DATA_POINTS:
+                    logger.warning(f"  警告: {coin} 的 {timeframe}/{period} 数据量不足(BTC:{len(btc_df)}, ALT:{len(alt_df)})，跳过...")
                     continue
                 if 'return' not in btc_df.columns or 'return' not in alt_df.columns:
                     logger.warning(f"  警告: {coin} 的 {timeframe}/{period} 数据缺少 'return' 列，跳过...")
