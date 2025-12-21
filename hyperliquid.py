@@ -499,6 +499,9 @@ class SpuriousTEAnalyzer:
                 diff_amount = max_long_corr - min_short_corr
                 if diff_amount > 0.5:
                     print_status = True
+                # 新增条件：当 '1d' period 的 tau_star 大于0时，也设置 print_status = True
+                if any(tau_star > 0 for _, _, period, tau_star in related_matrix_list if period == '1d'):
+                    print_status = True
             else:
                 # 常规数据，不输出详细结果
                 logger.info(f'常规数据：{coin}')
@@ -506,9 +509,7 @@ class SpuriousTEAnalyzer:
             # 数据不足，无法判断
             logger.warning(f'数据不足，无法判断异常模式：{coin} (短期数据: {len(short_term_corrs)}, 长期数据: {len(long_term_corrs)})')
         
-        # 新增条件：当 '1d' period 的 tau_star 大于0时，也设置 print_status = True
-        if any(tau_star > 0 for _, _, period, tau_star in related_matrix_list if period == '1d'):
-            print_status = True
+
         
         # 如果是异常模式，输出详细的相关系数分析结果
         if print_status:
