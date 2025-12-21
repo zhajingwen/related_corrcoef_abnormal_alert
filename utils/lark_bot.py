@@ -101,13 +101,15 @@ def sender_colourful(url, content, title=''):
         'Content-Type': 'application/json'
     }
 
+    num = 0  # 初始化重试计数器
     while True:
         try:
             response = requests.post(url, headers=headers, data=json.dumps(message))
             logger.info(f'lark 彩色告警调用成功：{response.text}')
+            return response.text  # 成功后返回，避免无限循环
         except requests.exceptions.RequestException:
             num += 1
         if num > 3:
-            logger.error(f'lark 告警调用失败：{response.text} {url} {num} {message}')
+            logger.error(f'lark 告警调用失败：{url} {num} {message}')
             break
     return None

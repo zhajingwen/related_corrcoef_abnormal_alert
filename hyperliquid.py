@@ -445,9 +445,10 @@ class SpuriousTEAnalyzer:
                 # 存储结果：使用列表存储，避免浮点数作为字典key导致数据覆盖
                 max_related_matrix_list.append((max_related_matrix, timeframe, period, tau_star))
 
+        # 过滤 NaN 值后再排序，避免排序行为不确定
+        valid_results = [(corr, tf, p, ts) for corr, tf, p, ts in max_related_matrix_list if not np.isnan(corr)]
         # 按最大相关系数降序排序
-        # 排序后，第一行是相关系数最大的组合，最后一行是相关系数最小的组合
-        max_related_matrix_list = sorted(max_related_matrix_list, key=lambda x: x[0], reverse=True)
+        max_related_matrix_list = sorted(valid_results, key=lambda x: x[0], reverse=True)
         
         # 转换为pandas DataFrame，方便查看和输出
         df_results = pd.DataFrame([
@@ -463,22 +464,35 @@ class SpuriousTEAnalyzer:
         # 判断是否需要输出结果（是否为异常模式）
         print_status = False
         diff_amount = 0
-        # 获取"最大相关系数"列的第一行和最后一行的值
-        if len(df_results) > 0:
-            first_max_corr = df_results.iloc[0]['最大相关系数']  # 最大相关系数（短期）
-            last_max_corr = df_results.iloc[-1]['最大相关系数']  # 最小相关系数（长期）
-            logger.info(f'first_max_corr: {first_max_corr}, last_max_corr: {last_max_corr}')
-            # 异常模式1：第一行最大相关系数大于0.6，最后一行最大相关系数小于0.3
-            # 这个数据状态表示1分钟级别的K线存在很大的滞后性，但是长期又表现出跟随的特性
+        
+        # 按 period 分组，区分短期和长期
+        # 短期：1天、7天的数据周期
+        # 长期：30天、60天的数据周期
+        short_periods = ['1d', '7d']
+        long_periods = ['30d', '60d']
+        
+        # 提取短期和长期的相关系数（已过滤 NaN）
+        short_term_corrs = [x[0] for x in max_related_matrix_list if x[2] in short_periods]
+        long_term_corrs = [x[0] for x in max_related_matrix_list if x[2] in long_periods]
+        
+        if short_term_corrs and long_term_corrs:
+            max_short_corr = max(short_term_corrs)  # 短期最大相关系数
+            max_long_corr = max(long_term_corrs)    # 长期最大相关系数
+            logger.info(f'max_short_corr: {max_short_corr}, max_long_corr: {max_long_corr}')
+            
+            # 异常模式：短期高相关但长期低相关
+            # 这个数据状态表示短期K线存在很大的滞后性，但是长期相关性较弱
             # 那这种就存在锚定BTC价格走势的时间差套利空间
-            if first_max_corr > 0.6 and last_max_corr < 0.3:
-                diff_amount = first_max_corr - last_max_corr
+            if max_short_corr > 0.6 and max_long_corr < 0.3:
+                diff_amount = max_short_corr - max_long_corr
                 if diff_amount > 0.5:
                     print_status = True
-            
             else:
                 # 常规数据，不输出详细结果
                 logger.info(f'常规数据：{coin}')
+        else:
+            # 数据不足，无法判断
+            logger.warning(f'数据不足，无法判断异常模式：{coin} (短期数据: {len(short_term_corrs)}, 长期数据: {len(long_term_corrs)})')
         
         # 如果是异常模式，输出详细的相关系数分析结果
         if print_status:
