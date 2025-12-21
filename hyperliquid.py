@@ -275,8 +275,8 @@ class SpuriousTEAnalyzer:
                 # lag=0：计算同步相关性，使用全样本
                 # 注意：这里x和y的顺序可能影响相关系数的符号
                 # 但相关系数是对称的，所以顺序不影响绝对值
-                x = alt_ret
-                y = btc_ret
+                x = btc_ret  # 保持与 lag>0 时的一致性
+                y = alt_ret
             
             # 确保两个数组长度一致（取最小值）
             m = min(len(x), len(y))
