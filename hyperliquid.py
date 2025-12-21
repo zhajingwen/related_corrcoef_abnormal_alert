@@ -2,7 +2,6 @@
 # 原理：通过计算不同时间周期和延迟下的相关系数，找出短期高相关但长期低相关的币种
 #       这类币种存在锚定BTC价格走势的时间差套利机会
 
-from enum import Flag
 import ccxt  # 加密货币交易所API库
 import time
 import logging
@@ -52,14 +51,16 @@ class SpuriousTEAnalyzer:
                           key格式：(timeframe, period)，例如：("1m", "60d")
                           value: 对应的BTC DataFrame数据
         """
+        # 保存交易所名称，用于日志和消息输出
+        self.exchange_name = exchange_name
         # 动态获取交易所实例，使用反射机制根据名称创建对应的交易所对象
         self.exchange = getattr(ccxt, exchange_name)({"timeout": timeout})
         # 设置默认时间周期：1分钟和5分钟K线
         self.timeframes = default_timeframes or ["1m", "5m"]
         # 设置默认数据周期：1天、7天、30天、60天
         self.periods = default_periods or ["1d", "7d", "30d", "60d"]
-        # BTC的交易对名称，作为基准货币
-        self.btc_symbol = "BTC/USDC"
+        # BTC的交易对名称，作为基准货币（使用永续合约格式）
+        self.btc_symbol = "BTC/USDC:USDC"
         # 缓存BTC各个颗粒度、各个周期级别的数据
         # 由于BTC数据对所有山寨币都相同，缓存可以大幅减少API调用次数
         self.btc_df_cache = {}  # 缓存字典，key为 (timeframe, period) 元组
@@ -362,8 +363,8 @@ class SpuriousTEAnalyzer:
         7. 判断是否为异常模式，如果是则输出结果
         """
         # 存储所有组合的最大相关系数
-        # key: 最大相关系数, value: (timeframe, period, tau_star) 元组
-        max_related_matrix_list = {}
+        # 每个元素为 (max_related_matrix, timeframe, period, tau_star) 元组
+        max_related_matrix_list = []
         
         # 遍历所有时间周期和数据周期的组合
         for timeframe in self.timeframes:
@@ -425,14 +426,12 @@ class SpuriousTEAnalyzer:
                 tau_star, corr_curve, max_related_matrix = self.find_optimal_delay(btc_ret, alt_ret)
                 logger.info(f'timeframe: {timeframe}, period: {period}, tau_star: {tau_star}, max_related_matrix: {max_related_matrix}')
 
-                # 存储结果：使用最大相关系数作为key
-                # 注意：如果多个组合有相同的最大相关系数，后面的会覆盖前面的
-                # 但由于我们按相关系数排序，这个影响不大
-                max_related_matrix_list[max_related_matrix] = (timeframe, period, tau_star)
+                # 存储结果：使用列表存储，避免浮点数作为字典key导致数据覆盖
+                max_related_matrix_list.append((max_related_matrix, timeframe, period, tau_star))
 
         # 按最大相关系数降序排序
         # 排序后，第一行是相关系数最大的组合，最后一行是相关系数最小的组合
-        max_related_matrix_list = sorted(max_related_matrix_list.items(), key=lambda x: x[0], reverse=True)
+        max_related_matrix_list = sorted(max_related_matrix_list, key=lambda x: x[0], reverse=True)
         
         # 转换为pandas DataFrame，方便查看和输出
         df_results = pd.DataFrame([
@@ -442,7 +441,7 @@ class SpuriousTEAnalyzer:
                 '数据周期': period,
                 '最优延迟': tau_star
             }
-            for max_corr, (timeframe, period, tau_star) in max_related_matrix_list
+            for max_corr, timeframe, period, tau_star in max_related_matrix_list
         ])
         
         # 判断是否需要输出结果（是否为异常模式）
@@ -453,7 +452,7 @@ class SpuriousTEAnalyzer:
             first_max_corr = df_results.iloc[0]['最大相关系数']  # 最大相关系数（短期）
             last_max_corr = df_results.iloc[-1]['最大相关系数']  # 最小相关系数（长期）
             logger.info(f'first_max_corr: {first_max_corr}, last_max_corr: {last_max_corr}')
-            # 异常模式1：第一行最大相关系数大于0.4，最后一行最大相关系数小于0.05
+            # 异常模式1：第一行最大相关系数大于0.6，最后一行最大相关系数小于0.3
             # 这个数据状态表示1分钟级别的K线存在很大的滞后性，但是长期又表现出跟随的特性
             # 那这种就存在锚定BTC价格走势的时间差套利空间
             if first_max_corr > 0.6 and last_max_corr < 0.3:
@@ -469,7 +468,7 @@ class SpuriousTEAnalyzer:
         if print_status:
             # 格式化输出，使用分隔线使结果更清晰
             logger.info("="*60)
-            content = f"hyperliquid \n \n \n {coin}相关系数分析结果\n{df_results.to_string(index=False)}\n"
+            content = f"{self.exchange_name} \n \n \n {coin}相关系数分析结果\n{df_results.to_string(index=False)}\n"
             content += f"\n diff_amount: {diff_amount:.2f}"
             logger.info(content)
             sender(content, self.lark_hook)
