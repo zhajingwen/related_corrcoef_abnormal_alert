@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class SpuriousTEAnalyzer:
+class DelayCorrelationAnalyzer:
     """
     山寨币与BTC相关系数分析器
     
