@@ -1,20 +1,17 @@
 # 功能：分析山寨币与BTC的皮尔逊相关系数，识别存在时间差套利空间的异常币种
 # 原理：通过计算不同时间周期和延迟下的相关系数，找出短期低相关但长期高相关的币种
-#       这类币种短期存在较大滞后性，但长期跟随BTC走势，存在时间差套利机会
 
-import ccxt  # 加密货币交易所API库
+import ccxt
 import time
 import logging
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from retry import retry  # 重试装饰器，用于网络请求失败时自动重试
+from retry import retry
 from utils.lark_bot import sender
 from utils.config import lark_bot_id
 
-# 配置日志系统
-# 设置日志级别为INFO，输出格式包含时间、名称、级别和消息
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -27,12 +24,8 @@ class DelayCorrelationAnalyzer:
     """
     山寨币与BTC相关系数分析器
     
-    功能：分析山寨币与BTC在不同时间周期下的皮尔逊相关系数，
     识别短期低相关但长期高相关的异常币种，这类币种存在时间差套利机会。
-    
-    注意：类名中的"TE"为历史遗留命名，实际使用皮尔逊相关系数而非传递熵。
     """
-    # 类常量：用于相关系数计算的最小数据点数量
     MIN_DATA_POINTS_FOR_CORRELATION = 10
     
     def __init__(self, exchange_name="kucoin", timeout=30000, default_timeframes=None, default_periods=None):
@@ -40,172 +33,88 @@ class DelayCorrelationAnalyzer:
         初始化分析器
         
         Args:
-            exchange_name (str): 交易所名称，默认为 "kucoin"
-                                支持ccxt库支持的所有交易所
-            timeout (int): 请求超时时间（毫秒），默认30000ms（30秒）
-            default_timeframes (list): 默认时间周期列表，K线的颗粒度
-                                      None时默认为 ["1m", "5m"]
-                                      例如："1m"表示1分钟K线，"5m"表示5分钟K线
-            default_periods (list): 默认数据周期列表，K线的覆盖范围
-                                   None时默认为 ["1d", "7d", "30d", "60d"]
-                                   例如："1d"表示最近1天的数据，"60d"表示最近60天的数据
-        
-        属性说明：
-            exchange: ccxt交易所实例，用于获取市场数据
-            timeframes: 要分析的时间周期列表
-            periods: 要分析的数据周期列表
-            btc_symbol: BTC交易对名称，固定为 "BTC/USDC:USDC"（永续合约格式）
-            btc_df_cache: BTC数据缓存字典，避免重复下载相同的数据
-                          key格式：(timeframe, period)，例如：("1m", "60d")
-                          value: 对应的BTC DataFrame数据
+            exchange_name: 交易所名称，支持ccxt库支持的所有交易所
+            timeout: 请求超时时间（毫秒）
+            default_timeframes: K线颗粒度列表，如 ["1m", "5m"]
+            default_periods: 数据周期列表，如 ["1d", "7d", "30d", "60d"]
         """
-        # 保存交易所名称，用于日志和消息输出
         self.exchange_name = exchange_name
-        # 动态获取交易所实例，使用反射机制根据名称创建对应的交易所对象
         self.exchange = getattr(ccxt, exchange_name)({"timeout": timeout})
-        # 设置默认时间周期：1分钟和5分钟K线
         self.timeframes = default_timeframes or ["1m", "5m"]
-        # 设置默认数据周期：1天、7天、30天、60天
         self.periods = default_periods or ["1d", "7d", "30d", "60d"]
-        # BTC的交易对名称，作为基准货币（使用永续合约格式）
         self.btc_symbol = "BTC/USDC:USDC"
-        # 缓存BTC各个颗粒度、各个周期级别的数据
-        # 由于BTC数据对所有山寨币都相同，缓存可以大幅减少API调用次数
-        self.btc_df_cache = {}  # 缓存字典，key为 (timeframe, period) 元组
+        self.btc_df_cache = {}
         self.lark_hook = f'https://open.feishu.cn/open-apis/bot/v2/hook/{lark_bot_id}'
-        # 实例常量：用于数据验证的最小数据点数量
         self.MIN_DATA_POINTS = 50
 
-    
     @staticmethod
     def _period_to_bars(period: str, timeframe: str) -> int:
+        """将时间周期转换为K线总条数"""
+        days = int(period.rstrip('d'))
+        timeframe_minutes = int(timeframe.rstrip('m'))
+        bars_per_day = int(24 * 60 / timeframe_minutes)
+        return days * bars_per_day
+    
+    def _safe_download(self, symbol: str, period: str, timeframe: str, coin: str = None) -> pd.DataFrame | None:
         """
-        将时间周期和数据周期转换为K线总条数（bars）
-        
-        计算公式：
-        - 每天K线数 = 24小时 * 60分钟 / 每个K线的分钟数
-        - 总K线数 = 天数 * 每天K线数
-        
-        示例：
-        - period="60d", timeframe="5m" → 60天 * (24*60/5) = 60 * 288 = 17280条K线
-        - period="1d", timeframe="1m" → 1天 * (24*60/1) = 1440条K线
+        安全下载数据，失败时返回None并记录日志
         
         Args:
-            period (str): 数据周期（K线的覆盖范围），格式为 "Xd"，X为天数
-                         例如："1d"表示1天，"60d"表示60天
-            timeframe (str): 时间周期（K线的颗粒度），格式为 "Xm"，X为分钟数
-                           例如："1m"表示1分钟K线，"5m"表示5分钟K线
+            symbol: 交易对名称
+            period: 数据周期
+            timeframe: K线时间周期
+            coin: 用于日志的币种名称（可选）
         
         Returns:
-            int: 统计周期内的K线总条数（bars）
+            成功返回DataFrame，失败返回None
         """
-        # 提取天数：去掉末尾的'd'字符并转换为整数
-        days = int(period.rstrip('d'))
-        # 提取分钟数：去掉末尾的'm'字符并转换为整数
-        timeframe_minutes = int(timeframe.rstrip('m'))
-        # 计算每天有多少根K线：24小时 * 60分钟 / 每根K线的分钟数
-        bars_per_day = int(24 * 60 / timeframe_minutes)
-        # 返回总K线数
-        return days * bars_per_day
+        display_name = coin or symbol
+        try:
+            return self.download_ccxt_data(symbol, period=period, timeframe=timeframe)
+        except Exception as e:
+            logger.error(f"下载 {display_name} 的 {timeframe}/{period} 数据失败: {type(e).__name__}: {str(e)}")
+            return None
     
     @retry(tries=10, delay=5, backoff=2)
     def download_ccxt_data(self, symbol: str, period: str, timeframe: str) -> pd.DataFrame:
         """
-        从交易所下载指定交易对的OHLCV（开高低收成交量）历史数据
-        
-        功能说明：
-        1. 计算需要下载的K线总数
-        2. 分批次下载数据（每次最多1500条，因为交易所API通常有限制）
-        3. 处理数据格式转换和时间戳对齐
-        4. 计算收益率和美元成交量
-        
-        重试机制：
-        - 使用@retry装饰器，最多重试10次
-        - 每次重试间隔5秒，指数退避（backoff=2）
+        从交易所下载OHLCV历史数据
         
         Args:
-            symbol (str): 交易对名称，例如 "BTC/USDC"、"ETH/USDC"
-            period (str): 数据周期，例如 "60d"（60天）
-            timeframe (str): K线时间周期，例如 "5m"（5分钟K线）
+            symbol: 交易对名称，如 "BTC/USDC"
+            period: 数据周期，如 "60d"
+            timeframe: K线时间周期，如 "5m"
         
         Returns:
-            pd.DataFrame: 包含以下列的DataFrame：
-                - Timestamp: 时间戳（作为索引）
-                - Open: 开盘价
-                - High: 最高价
-                - Low: 最低价
-                - Close: 收盘价
-                - Volume: 成交量（以基础货币为单位）
-                - return: 收益率（相邻K线的价格变化百分比）
-                - volume_usd: 美元成交量（Volume * Close）
-        
-        注意：
-            - 如果数据为空，返回包含所有必要列的空DataFrame
-            - 时间戳转换为本地时区（去除UTC时区信息）
-            - 数据按时间戳升序排列
+            包含 Open/High/Low/Close/Volume/return/volume_usd 列的DataFrame
         """
-        # 计算目标K线总数
         target_bars = self._period_to_bars(period, timeframe)
-        # 计算每根K线对应的毫秒数（timeframe为分钟级）
-        # 例如：5m → 5 * 60 * 1000 = 300000毫秒
         ms_per_bar = int(timeframe.rstrip('m')) * 60 * 1000
-        # 获取当前时间戳（毫秒）
         now_ms = self.exchange.milliseconds()
-        # 计算起始时间戳：当前时间 - 目标K线数 * 每根K线的毫秒数
         since = now_ms - target_bars * ms_per_bar
 
-        # 存储所有下载的K线数据
         all_rows = []
-        # 已获取的K线数量
         fetched = 0
         
-        # 循环下载数据，直到获取足够的数据或没有更多数据
         while True:
-            # 调用交易所API获取OHLCV数据
-            # limit=1500：每次最多获取1500条K线（交易所API限制）
-            # 重试机制由@retry装饰器处理
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=1500)
-            
-            # 如果没有获取到数据，退出循环
             if not ohlcv:
                 break
             
-            # 将本次获取的数据添加到总列表
             all_rows.extend(ohlcv)
             fetched += len(ohlcv)
-            
-            # 更新起始时间戳：使用最后一条K线的时间戳 + 1毫秒
-            # 避免因数据间隙导致的数据遗漏问题（原来用 ms_per_bar 可能跳过间隙中的数据）
             since = ohlcv[-1][0] + 1
             
-            # 如果获取的数据少于1500条（说明已经到历史数据边界）
-            # 或者已经获取了足够的数据，则退出循环
             if len(ohlcv) < 1500 or fetched >= target_bars:
                 break
 
-        # 如果没有获取到任何数据，返回空DataFrame（包含必要的列）
         if not all_rows:
             return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume", "return", "volume_usd"])
 
-        # 将原始数据转换为DataFrame
-        # OHLCV格式：[timestamp, open, high, low, close, volume]
         df = pd.DataFrame(all_rows, columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"])
-        
-        # 将时间戳从毫秒转换为datetime对象
-        # unit="ms": 输入是毫秒时间戳
-        # utc=True: 先转换为UTC时区
-        # dt.tz_convert(None): 再转换为本地时区（去除时区信息）
         df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms", utc=True).dt.tz_convert(None)
-        
-        # 将时间戳设置为索引，并按时间升序排列
         df = df.set_index("Timestamp").sort_index()
-        
-        # 计算收益率：相邻K线收盘价的百分比变化
-        # pct_change(): 计算百分比变化，第一个值为NaN（因为没有前一个值）
-        # fillna(0): 将NaN填充为0（第一个K线的收益率为0）
         df['return'] = df['Close'].pct_change().fillna(0)
-        
-        # 计算美元成交量：成交量（基础货币） * 收盘价（USDC）
         df['volume_usd'] = df['Volume'] * df['Close']
         
         return df
@@ -213,88 +122,41 @@ class DelayCorrelationAnalyzer:
     @staticmethod
     def find_optimal_delay(btc_ret, alt_ret, max_lag=48):
         """
-        寻找最优延迟 τ*（tau star）
+        寻找最优延迟 τ*
         
-        功能说明：
-        通过计算不同延迟（lag）下BTC和山寨币收益率的相关系数，找出使相关系数最大的延迟值。
-        这个延迟值表示山寨币相对于BTC的滞后时间。
-        
-        算法原理：
-        - 对于每个延迟lag（0到max_lag），计算BTC[t]和ALT[t+lag]的相关系数
-        - lag=0：计算BTC和ALT同时刻的相关系数（同步相关性）
-        - lag>0：计算BTC[t]和ALT[t+lag]的相关系数（滞后相关性）
-          - 如果lag=5，表示ALT滞后BTC 5个时间单位
-          - 即：BTC在t时刻的价格变化，会影响ALT在t+5时刻的价格
-        
-        最优延迟的意义：
-        - tau_star表示使相关系数最大的延迟值
-        - 如果tau_star>0，说明ALT滞后于BTC，存在时间差套利机会
-        - 如果tau_star=0，说明ALT与BTC同步，没有明显滞后
+        通过计算不同延迟下BTC和山寨币收益率的相关系数，找出使相关系数最大的延迟值。
+        tau_star > 0 表示山寨币滞后于BTC，存在时间差套利机会。
         
         Args:
-            btc_ret (np.ndarray): BTC收益率数组，形状为(n,)
-            alt_ret (np.ndarray): 山寨币收益率数组，形状为(n,)
-            max_lag (int): 最大延迟值，默认48
-                         对于1分钟K线，max_lag=48表示最多滞后48分钟
-                         对于5分钟K线，max_lag=48表示最多滞后240分钟（4小时）
+            btc_ret: BTC收益率数组
+            alt_ret: 山寨币收益率数组
+            max_lag: 最大延迟值
         
         Returns:
-            tuple: (tau_star, corrs, max_related_matrix)
-                - tau_star (int): 最优延迟值，使相关系数最大的lag值
-                - corrs (list): 所有延迟值对应的相关系数列表，长度为max_lag+1
-                               索引i对应lag=i时的相关系数
-                - max_related_matrix (float): 最大相关系数值，范围[-1, 1]
-                                            接近1表示强正相关，接近-1表示强负相关
-                                            接近0表示无相关性
-        
-        示例：
-            如果tau_star=10，max_related_matrix=0.8，表示：
-            - ALT滞后BTC 10个时间单位时，相关系数最大（0.8）
-            - 即BTC在t时刻的价格变化，会在10个时间单位后影响ALT的价格
+            (tau_star, corrs, max_related_matrix): 最优延迟、相关系数列表、最大相关系数
         """
-        # 存储每个延迟值对应的相关系数
         corrs = []
-        # 生成延迟值列表：[0, 1, 2, ..., max_lag]
         lags = list(range(0, max_lag + 1))
         
-        # 遍历每个延迟值，计算对应的相关系数
         for lag in lags:
             if lag > 0:
-                # ALT滞后BTC的情况：验证BTC[t]是否影响ALT[t+lag]
-                # 例如lag=5：比较BTC的前n-5个数据与ALT的后n-5个数据
-                # 这样对齐后，BTC[i]对应ALT[i+5]，表示ALT滞后5个时间单位
-                x = btc_ret[:-lag]  # BTC的前n-lag个数据点
-                y = alt_ret[lag:]   # ALT的后n-lag个数据点（跳过前lag个）
-            elif lag == 0:
-                # lag=0：计算同步相关性，使用全样本
-                # 注意：这里x和y的顺序可能影响相关系数的符号
-                # 但相关系数是对称的，所以顺序不影响绝对值
-                x = btc_ret  # 保持与 lag>0 时的一致性
+                # ALT滞后BTC: 比较 BTC[t] 与 ALT[t+lag]
+                x = btc_ret[:-lag]
+                y = alt_ret[lag:]
+            else:
+                x = btc_ret
                 y = alt_ret
             
-            # 确保两个数组长度一致（取最小值）
             m = min(len(x), len(y))
             
-            # 如果数据点太少，无法计算可靠的相关系数
-            # 使用 np.nan 标记无效值（-1 是有效的相关系数值，表示完全负相关）
             if m < DelayCorrelationAnalyzer.MIN_DATA_POINTS_FOR_CORRELATION:
                 corrs.append(np.nan)
                 continue
             
-            # 计算皮尔逊相关系数
-            # np.corrcoef返回2x2的相关系数矩阵：
-            # [[corr(x,x), corr(x,y)],
-            #  [corr(y,x), corr(y,y)]]
-            # [0,1]位置就是x和y的相关系数
             related_matrix = np.corrcoef(x[:m], y[:m])[0, 1]
-            # 检查是否返回 NaN（当输入数据标准差为0时会发生）
-            if np.isnan(related_matrix):
-                corrs.append(np.nan)
-            else:
-                corrs.append(related_matrix)
+            corrs.append(np.nan if np.isnan(related_matrix) else related_matrix)
         
-        # 找出使相关系数最大的延迟值（最优延迟）
-        # 需要排除 NaN 值
+        # 找出最大相关系数对应的延迟值
         valid_corrs = np.array(corrs)
         valid_mask = ~np.isnan(valid_corrs)
         if valid_mask.any():
@@ -303,239 +165,164 @@ class DelayCorrelationAnalyzer:
             tau_star = lags[best_idx]
             max_related_matrix = valid_corrs[best_idx]
         else:
-            # 所有延迟的相关系数都无效
             tau_star = 0
             max_related_matrix = np.nan
         
         return tau_star, corrs, max_related_matrix
     
+    def _get_btc_data(self, timeframe: str, period: str) -> pd.DataFrame | None:
+        """获取BTC数据（带缓存）"""
+        cache_key = (timeframe, period)
+        if cache_key not in self.btc_df_cache:
+            btc_df = self._safe_download(self.btc_symbol, period, timeframe)
+            if btc_df is None:
+                return None
+            self.btc_df_cache[cache_key] = btc_df
+        return self.btc_df_cache[cache_key].copy()
+    
+    def _analyze_single_combination(self, coin: str, timeframe: str, period: str) -> tuple | None:
+        """
+        分析单个 timeframe/period 组合
+        
+        Returns:
+            成功返回 (correlation, timeframe, period, tau_star)，失败返回 None
+        """
+        logger.info(f"正在下载 {coin} 的 {timeframe}、{period} 数据...")
+        
+        btc_df = self._get_btc_data(timeframe, period)
+        if btc_df is None:
+            logger.warning(f"跳过 {coin} 的 {timeframe}/{period} 组合（BTC数据下载失败）")
+            return None
+        
+        alt_df = self._safe_download(coin, period, timeframe, coin)
+        if alt_df is None:
+            logger.warning(f"跳过 {coin} 的 {timeframe}/{period} 组合（数据下载失败）")
+            return None
+        
+        # 对齐时间索引
+        common_idx = btc_df.index.intersection(alt_df.index)
+        btc_df, alt_df = btc_df.loc[common_idx], alt_df.loc[common_idx]
+        
+        # 数据验证
+        if len(btc_df) < self.MIN_DATA_POINTS or len(alt_df) < self.MIN_DATA_POINTS:
+            logger.warning(f"{coin} 的 {timeframe}/{period} 数据量不足，跳过...")
+            return None
+        if 'return' not in btc_df.columns or 'return' not in alt_df.columns:
+            logger.warning(f"{coin} 的 {timeframe}/{period} 数据缺少 'return' 列，跳过...")
+            return None
+        
+        tau_star, _, related_matrix = self.find_optimal_delay(
+            btc_df['return'].values, 
+            alt_df['return'].values
+        )
+        logger.info(f'timeframe: {timeframe}, period: {period}, tau_star: {tau_star}, max_related_matrix: {related_matrix}')
+        
+        return (related_matrix, timeframe, period, tau_star)
+    
+    def _detect_anomaly_pattern(self, results: list) -> tuple[bool, float]:
+        """
+        检测异常模式：短期低相关但长期高相关
+        
+        异常模式判断阈值：
+        - 长期相关系数 > 0.6：长期与BTC有较强跟随性
+        - 短期相关系数 < 0.3：短期存在明显滞后
+        - 差值 > 0.5：短期和长期差异足够显著
+        
+        Returns:
+            (is_anomaly, diff_amount): 是否异常模式、相关系数差值
+        """
+        short_periods = ['1d']
+        long_periods = ['7d', '30d', '60d']
+        
+        short_term_corrs = [x[0] for x in results if x[2] in short_periods]
+        long_term_corrs = [x[0] for x in results if x[2] in long_periods]
+        
+        if not short_term_corrs or not long_term_corrs:
+            return False, 0
+        
+        min_short_corr = min(short_term_corrs)
+        max_long_corr = max(long_term_corrs)
+        logger.info(f'min_short_corr: {min_short_corr}, max_long_corr: {max_long_corr}')
+        
+        if max_long_corr > 0.6 and min_short_corr < 0.3:
+            diff_amount = max_long_corr - min_short_corr
+            if diff_amount > 0.5:
+                return True, diff_amount
+            # 短期存在明显滞后时也触发
+            if any(tau_star > 0 for _, _, period, tau_star in results if period == '1d'):
+                return True, diff_amount
+        
+        return False, 0
+    
+    def _output_results(self, coin: str, results: list, diff_amount: float):
+        """输出异常模式的分析结果"""
+        df_results = pd.DataFrame([
+            {'相关系数': corr, '时间周期': tf, '数据周期': p, '最优延迟': ts}
+            for corr, tf, p, ts in results
+        ])
+        
+        logger.info("=" * 60)
+        content = f"{self.exchange_name} \n \n \n {coin}相关系数分析结果\n{df_results.to_string(index=False)}\n"
+        content += f"\n diff_amount: {diff_amount:.2f}"
+        logger.info(content)
+        sender(content, self.lark_hook)
+        logger.info("=" * 60)
+    
     def one_coin_analysis(self, coin: str):
         """
         分析单个币种与BTC的相关系数，识别异常模式
         
-        功能说明：
-        1. 遍历所有时间周期（timeframes）和数据周期（periods）的组合
-        2. 下载BTC和该币种的历史数据
-        3. 计算每个组合下的最优延迟和最大相关系数
-        4. 识别异常模式：短期低相关但长期高相关的币种
-        
-        异常模式识别：
-        - 主要模式：长期最大相关系数 > 0.6，且短期最小相关系数 < 0.3，且差值 > 0.5
-          含义：短期存在明显滞后性（低相关），但长期与BTC有较强的跟随性（高相关），
-          存在锚定BTC价格走势的时间差套利空间
-        - 额外触发条件：当 '1d' period 的最优延迟（tau_star）大于0时，也会触发输出
-          含义：即使不满足主要模式，如果短期存在明显滞后，也可能存在套利机会
-        
-        输出：
-        - 如果检测到异常模式，会输出详细的相关系数分析结果表格
-        - 表格包含：最大相关系数、时间周期、数据周期、最优延迟
-        
         Args:
-            coin (str): 币种交易对名称，例如 "KCS/USDC"、"ETH/USDC"
-        
-        处理流程：
-        1. 遍历所有timeframe和period组合
-        2. 下载BTC数据（使用缓存避免重复下载）
-        3. 下载山寨币数据
-        4. 对齐时间索引，确保数据时间一致
-        5. 计算最优延迟和最大相关系数
-        6. 收集所有结果并按相关系数排序
-        7. 判断是否为异常模式，如果是则输出结果
+            coin: 币种交易对名称，如 "ETH/USDC:USDC"
         """
-        # 存储所有组合的最大相关系数
-        # 每个元素为 (max_related_matrix, timeframe, period, tau_star) 元组
-        related_matrix_list = []
+        results = []
         
-        # 遍历所有时间周期和数据周期的组合
         for timeframe in self.timeframes:
             for period in self.periods:
-                logger.info(f"正在下载 {coin} 的 {timeframe}、{period} 数据...")
-                
                 try:
-                    # 缓存BTC数据，避免重复下载（因为BTC数据对所有币种都相同）
-                    cache_key = (timeframe, period)
-                    if cache_key not in self.btc_df_cache:
-                        # 如果缓存中没有，下载BTC数据并存入缓存
-                        try:
-                            self.btc_df_cache[cache_key] = self.download_ccxt_data(
-                                self.btc_symbol, period=period, timeframe=timeframe
-                            )
-                        except Exception as e:
-                            logger.error(f"  错误: 下载 {self.btc_symbol} 的 {timeframe}/{period} 数据失败: {type(e).__name__}: {str(e)}")
-                            logger.warning(f"  跳过 {coin} 的 {timeframe}/{period} 组合（BTC数据下载失败）")
-                            continue
-                    
-                    # 必须使用 .copy()，避免后续操作（如 loc 索引）修改缓存的数据
-                    # 如果直接使用缓存数据，修改会影响后续币种的分析
-                    btc_df = self.btc_df_cache[cache_key].copy()
-                    
-                    # 下载山寨币数据
-                    try:
-                        alt_df = self.download_ccxt_data(coin, period=period, timeframe=timeframe)
-                    except Exception as e:
-                        logger.error(f"  错误: 下载 {coin} 的 {timeframe}/{period} 数据失败: {type(e).__name__}: {str(e)}")
-                        logger.warning(f"  跳过 {coin} 的 {timeframe}/{period} 组合（数据下载失败）")
-                        continue
+                    result = self._analyze_single_combination(coin, timeframe, period)
+                    if result is not None:
+                        results.append(result)
                 except Exception as e:
-                    # 捕获其他未预期的异常
-                    logger.error(f"  错误: 处理 {coin} 的 {timeframe}/{period} 数据时发生异常: {type(e).__name__}: {str(e)}")
-                    logger.warning(f"  跳过 {coin} 的 {timeframe}/{period} 组合")
+                    logger.error(f"处理 {coin} 的 {timeframe}/{period} 时发生异常: {type(e).__name__}: {str(e)}")
                     continue
-                
-                # 对齐时间索引：只保留BTC和山寨币都有的时间点
-                # 这样可以确保两个时间序列的时间一致
-                common_idx = btc_df.index.intersection(alt_df.index)
-                btc_df, alt_df = btc_df.loc[common_idx], alt_df.loc[common_idx]
-                
-                # 检查数据是否为空或数据量不足
-                if len(btc_df) < self.MIN_DATA_POINTS or len(alt_df) < self.MIN_DATA_POINTS:
-                    logger.warning(f"  警告: {coin} 的 {timeframe}/{period} 数据量不足(BTC:{len(btc_df)}, ALT:{len(alt_df)})，跳过...")
-                    continue
-                if 'return' not in btc_df.columns or 'return' not in alt_df.columns:
-                    logger.warning(f"  警告: {coin} 的 {timeframe}/{period} 数据缺少 'return' 列，跳过...")
-                    continue
-                
-                # 提取收益率数组
-                btc_ret = btc_df['return'].values
-                alt_ret = alt_df['return'].values
-                
-                # 找最优延迟（单位：分钟级 bars）
-                # tau_star: 最优延迟值
-                # corr_curve: 所有延迟值对应的相关系数列表（当前未使用）
-                # related_matrix: 特定样本周期内的相关系数值
-                tau_star, corr_curve, related_matrix = self.find_optimal_delay(btc_ret, alt_ret)
-                logger.info(f'timeframe: {timeframe}, period: {period}, tau_star: {tau_star}, max_related_matrix: {related_matrix}')
-
-                # 存储结果：使用列表存储，避免浮点数作为字典key导致数据覆盖
-                related_matrix_list.append((related_matrix, timeframe, period, tau_star))
-
-        # 过滤 NaN 值后再排序，避免排序行为不确定
-        valid_results = [(corr, tf, p, ts) for corr, tf, p, ts in related_matrix_list if not np.isnan(corr)]
-        # 不同统计周期相关系数降序排序
-        related_matrix_list = sorted(valid_results, key=lambda x: x[0], reverse=True)
         
-        # 转换为pandas DataFrame，方便查看和输出
-        df_results = pd.DataFrame([
-            {
-                '相关系数': related_corr_matrix,
-                '时间周期': timeframe,
-                '数据周期': period,
-                '最优延迟': tau_star
-            }
-            for related_corr_matrix, timeframe, period, tau_star in related_matrix_list
-        ])
+        # 过滤 NaN 并按相关系数降序排序
+        valid_results = [(corr, tf, p, ts) for corr, tf, p, ts in results if not np.isnan(corr)]
+        valid_results = sorted(valid_results, key=lambda x: x[0], reverse=True)
         
-        # 判断是否需要输出结果（是否为异常模式）
-        print_status = False
-        diff_amount = 0
+        if not valid_results:
+            logger.warning(f'数据不足，无法分析：{coin}')
+            return
         
-        # 按 period 分组，区分短期和长期
-        # 短期：1天的数据周期
-        # 长期：7天、30天、60天的数据周期
-        short_periods = ['1d']
-        long_periods = ['7d', '30d', '60d']
+        is_anomaly, diff_amount = self._detect_anomaly_pattern(valid_results)
         
-        # 提取短期和长期的相关系数（已过滤 NaN）
-        short_term_corrs = [x[0] for x in related_matrix_list if x[2] in short_periods]
-        long_term_corrs = [x[0] for x in related_matrix_list if x[2] in long_periods]
-        
-        if short_term_corrs and long_term_corrs:
-            min_short_corr = min(short_term_corrs)  # 短期最小相关系数
-            max_long_corr = max(long_term_corrs)    # 长期最大相关系数
-            logger.info(f'min_short_corr: {min_short_corr}, max_long_corr: {max_long_corr}')
-            
-            # 异常模式：短期低相关但长期高相关
-            # 这个数据状态表示短期K线存在很大的滞后性，但是长期相关性较强
-            # 那这种就存在锚定BTC价格走势的时间差套利空间
-            # 异常模式判断阈值（基于经验设定）：
-            # - 长期相关系数 > 0.6：表示长期与BTC有较强的跟随性
-            # - 短期相关系数 < 0.3：表示短期存在明显滞后
-            # - 差值 > 0.5：确保短期和长期差异足够显著
-            if max_long_corr > 0.6 and min_short_corr < 0.3:
-                diff_amount = max_long_corr - min_short_corr
-                if diff_amount > 0.5:
-                    print_status = True
-                # 新增条件：当 '1d' period 的 tau_star 大于0时，也设置 print_status = True
-                if any(tau_star > 0 for _, _, period, tau_star in related_matrix_list if period == '1d'):
-                    print_status = True
-            else:
-                # 常规数据，不输出详细结果
-                logger.info(f'常规数据：{coin}')
+        if is_anomaly:
+            self._output_results(coin, valid_results, diff_amount)
         else:
-            # 数据不足，无法判断
-            logger.warning(f'数据不足，无法判断异常模式：{coin} (短期数据: {len(short_term_corrs)}, 长期数据: {len(long_term_corrs)})')
-        
-
-        
-        # 如果是异常模式，输出详细的相关系数分析结果
-        if print_status:
-            # 格式化输出，使用分隔线使结果更清晰
-            logger.info("="*60)
-            content = f"{self.exchange_name} \n \n \n {coin}相关系数分析结果\n{df_results.to_string(index=False)}\n"
-            content += f"\n diff_amount: {diff_amount:.2f}"
-            logger.info(content)
-            sender(content, self.lark_hook)
-            logger.info("="*60)
+            logger.info(f'常规数据：{coin}')
     
     def run(self):
-        """
-        主运行方法，分析交易所中所有USDC永续合约交易对
-        
-        功能说明：
-        1. 加载交易所的所有市场信息
-        2. 筛选出USDC永续合约交易对（格式为 XXX/USDC:USDC）
-        3. 对每个交易对进行分析，识别异常模式
-        4. 在每次分析之间添加延迟，避免API请求过于频繁
-        
-        处理流程：
-        1. 调用exchange.load_markets()加载所有市场信息
-        2. 遍历所有交易对
-        3. 检查交易对名称是否包含 '/USDC:USDC'（永续合约格式）
-        4. 对匹配的交易对调用one_coin_analysis()进行分析
-        5. 每次分析后等待1秒，避免触发API限流
-        
-        输出：
-        - 对于检测到异常模式的币种，会输出详细的相关系数分析结果
-        - 对于常规币种，只输出简单的日志信息
-        
-        注意：
-            - 分析所有币种可能需要较长时间，取决于交易所的交易对数量
-            - 使用BTC数据缓存可以大幅减少API调用次数
-            - 如果交易所API有速率限制，可能需要调整sleep时间
-        """
-        # 加载交易所的所有市场信息
-        # 返回一个字典，key是交易对名称（如"BTC/USDC"），value是市场信息字典
+        """分析交易所中所有USDC永续合约交易对"""
         all_coins = self.exchange.load_markets()
         
-        # 遍历所有交易对
         for coin in all_coins:
-            coin_item = all_coins[coin]
+            logger.info(f"coin: {coin}, coin_item: {all_coins[coin]}")
             
-            logger.info(f"coin: {coin}, coin_item: {coin_item}")
-            
-            # 只考虑永续合约
             if '/USDC:USDC' not in coin:
                 continue
-            # 分析当前币种，添加错误处理以跳过失败的币种
+            
             try:
                 logger.info(f"开始分析币种: {coin}")
                 self.one_coin_analysis(coin)
                 logger.info(f"完成分析币种: {coin}")
             except Exception as e:
-                # 捕获所有异常，记录错误但继续处理下一个币种
                 logger.error(f"分析币种 {coin} 时发生错误: {type(e).__name__}: {str(e)}")
-                logger.warning(f"跳过币种 {coin}，继续处理下一个币种...")
                 continue
             
-            # 等待1秒，避免API请求过于频繁
-            # 这有助于避免触发交易所的API速率限制
             time.sleep(1)
 
 
-# ================== 运行 ==================
 if __name__ == "__main__":
-    exchange_name = "hyperliquid"
-    # 创建分析器实例
-    analyzer = DelayCorrelationAnalyzer(exchange_name=exchange_name)
-    # 运行分析，分析所有USDC交易对
+    analyzer = DelayCorrelationAnalyzer(exchange_name="hyperliquid")
     analyzer.run()
