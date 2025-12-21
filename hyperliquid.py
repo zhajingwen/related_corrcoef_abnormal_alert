@@ -473,8 +473,8 @@ class SpuriousTEAnalyzer:
             # 那这种就存在锚定BTC价格走势的时间差套利空间
             if first_max_corr > 0.6 and last_max_corr < 0.3:
                 diff_amount = first_max_corr - last_max_corr
-                print_status = True
-                # if diff_amount > 0.5:
+                if diff_amount > 0.5:
+                    print_status = True
             
             else:
                 # 常规数据，不输出详细结果
