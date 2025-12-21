@@ -377,7 +377,7 @@ class SpuriousTEAnalyzer:
         """
         # 存储所有组合的最大相关系数
         # 每个元素为 (max_related_matrix, timeframe, period, tau_star) 元组
-        max_related_matrix_list = []
+        related_matrix_list = []
         
         # 遍历所有时间周期和数据周期的组合
         for timeframe in self.timeframes:
@@ -438,27 +438,27 @@ class SpuriousTEAnalyzer:
                 # 找最优延迟（单位：分钟级 bars）
                 # tau_star: 最优延迟值
                 # corr_curve: 所有延迟值对应的相关系数列表（当前未使用）
-                # max_related_matrix: 最大相关系数值
-                tau_star, corr_curve, max_related_matrix = self.find_optimal_delay(btc_ret, alt_ret)
-                logger.info(f'timeframe: {timeframe}, period: {period}, tau_star: {tau_star}, max_related_matrix: {max_related_matrix}')
+                # related_matrix: 特定样本周期内的相关系数值
+                tau_star, corr_curve, related_matrix = self.find_optimal_delay(btc_ret, alt_ret)
+                logger.info(f'timeframe: {timeframe}, period: {period}, tau_star: {tau_star}, max_related_matrix: {related_matrix}')
 
                 # 存储结果：使用列表存储，避免浮点数作为字典key导致数据覆盖
-                max_related_matrix_list.append((max_related_matrix, timeframe, period, tau_star))
+                related_matrix_list.append((related_matrix, timeframe, period, tau_star))
 
         # 过滤 NaN 值后再排序，避免排序行为不确定
-        valid_results = [(corr, tf, p, ts) for corr, tf, p, ts in max_related_matrix_list if not np.isnan(corr)]
-        # 按最大相关系数降序排序
-        max_related_matrix_list = sorted(valid_results, key=lambda x: x[0], reverse=True)
+        valid_results = [(corr, tf, p, ts) for corr, tf, p, ts in related_matrix_list if not np.isnan(corr)]
+        # 不同统计周期相关系数降序排序
+        related_matrix_list = sorted(valid_results, key=lambda x: x[0], reverse=True)
         
         # 转换为pandas DataFrame，方便查看和输出
         df_results = pd.DataFrame([
             {
-                '最大相关系数': max_corr,
+                '相关系数': related_corr_matrix,
                 '时间周期': timeframe,
                 '数据周期': period,
                 '最优延迟': tau_star
             }
-            for max_corr, timeframe, period, tau_star in max_related_matrix_list
+            for related_corr_matrix, timeframe, period, tau_star in related_matrix_list
         ])
         
         # 判断是否需要输出结果（是否为异常模式）
@@ -466,25 +466,25 @@ class SpuriousTEAnalyzer:
         diff_amount = 0
         
         # 按 period 分组，区分短期和长期
-        # 短期：1天、7天的数据周期
-        # 长期：30天、60天的数据周期
-        short_periods = ['1d', '7d']
-        long_periods = ['30d', '60d']
+        # 短期：1天的数据周期
+        # 长期：7天、30天、60天的数据周期
+        short_periods = ['1d']
+        long_periods = ['7d', '30d', '60d']
         
         # 提取短期和长期的相关系数（已过滤 NaN）
-        short_term_corrs = [x[0] for x in max_related_matrix_list if x[2] in short_periods]
-        long_term_corrs = [x[0] for x in max_related_matrix_list if x[2] in long_periods]
+        short_term_corrs = [x[0] for x in related_matrix_list if x[2] in short_periods]
+        long_term_corrs = [x[0] for x in related_matrix_list if x[2] in long_periods]
         
         if short_term_corrs and long_term_corrs:
             max_short_corr = max(short_term_corrs)  # 短期最大相关系数
             max_long_corr = max(long_term_corrs)    # 长期最大相关系数
             logger.info(f'max_short_corr: {max_short_corr}, max_long_corr: {max_long_corr}')
             
-            # 异常模式：短期高相关但长期低相关
-            # 这个数据状态表示短期K线存在很大的滞后性，但是长期相关性较弱
+            # 异常模式：短期低相关但长期高相关
+            # 这个数据状态表示短期K线存在很大的滞后性，但是长期相关性较强
             # 那这种就存在锚定BTC价格走势的时间差套利空间
-            if max_short_corr > 0.6 and max_long_corr < 0.3:
-                diff_amount = max_short_corr - max_long_corr
+            if max_long_corr > 0.6 and max_short_corr < 0.3:
+                diff_amount = max_long_corr - max_short_corr
                 if diff_amount > 0.5:
                     print_status = True
             else:
