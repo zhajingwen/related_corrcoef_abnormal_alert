@@ -23,6 +23,12 @@ def setup_logging(log_file="hyperliquid.log", level=logging.INFO):
     Returns:
         配置好的 logger 实例
     """
+    log = logging.getLogger(__name__)
+    
+    # 避免重复添加 handlers
+    if log.handlers:
+        return log
+    
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
@@ -39,7 +45,6 @@ def setup_logging(log_file="hyperliquid.log", level=logging.INFO):
     file_handler.setFormatter(formatter)
     
     # 配置 logger
-    log = logging.getLogger(__name__)
     log.setLevel(level)
     log.addHandler(console_handler)
     log.addHandler(file_handler)
@@ -82,13 +87,57 @@ class DelayCorrelationAnalyzer:
         self.periods = default_periods or ["1d", "7d", "30d", "60d"]
         self.btc_symbol = "BTC/USDC:USDC"
         self.btc_df_cache = {}
-        self.lark_hook = f'https://open.feishu.cn/open-apis/bot/v2/hook/{lark_bot_id}'
+        
+        # 检查 lark_bot_id 是否有效
+        if not lark_bot_id:
+            logger.warning("环境变量 LARKBOT_ID 未设置，飞书通知功能将不可用")
+            self.lark_hook = None
+        else:
+            self.lark_hook = f'https://open.feishu.cn/open-apis/bot/v2/hook/{lark_bot_id}'
 
+    @staticmethod
+    def _timeframe_to_minutes(timeframe: str) -> int:
+        """
+        将 timeframe 字符串转换为分钟数
+        
+        支持的格式：
+        - 分钟：1m, 5m, 15m, 30m
+        - 小时：1h, 4h, 12h
+        - 天：1d, 3d
+        - 周：1w
+        
+        Args:
+            timeframe: K线时间周期字符串
+        
+        Returns:
+            对应的分钟数
+        
+        Raises:
+            ValueError: 不支持的 timeframe 格式
+        """
+        unit_multipliers = {
+            'm': 1,
+            'h': 60,
+            'd': 24 * 60,
+            'w': 7 * 24 * 60,
+        }
+        
+        unit = timeframe[-1].lower()
+        if unit not in unit_multipliers:
+            raise ValueError(f"不支持的 timeframe 格式: {timeframe}，支持的单位: m, h, d, w")
+        
+        try:
+            value = int(timeframe[:-1])
+        except ValueError:
+            raise ValueError(f"无效的 timeframe 格式: {timeframe}，数值部分必须是整数")
+        
+        return value * unit_multipliers[unit]
+    
     @staticmethod
     def _period_to_bars(period: str, timeframe: str) -> int:
         """将时间周期转换为K线总条数"""
         days = int(period.rstrip('d'))
-        timeframe_minutes = int(timeframe.rstrip('m'))
+        timeframe_minutes = DelayCorrelationAnalyzer._timeframe_to_minutes(timeframe)
         bars_per_day = int(24 * 60 / timeframe_minutes)
         return days * bars_per_day
     
@@ -126,7 +175,7 @@ class DelayCorrelationAnalyzer:
             包含 Open/High/Low/Close/Volume/return/volume_usd 列的DataFrame
         """
         target_bars = self._period_to_bars(period, timeframe)
-        ms_per_bar = int(timeframe.rstrip('m')) * 60 * 1000
+        ms_per_bar = self._timeframe_to_minutes(timeframe) * 60 * 1000
         now_ms = self.exchange.milliseconds()
         since = now_ms - target_bars * ms_per_bar
 
@@ -174,8 +223,14 @@ class DelayCorrelationAnalyzer:
         """
         corrs = []
         lags = list(range(0, max_lag + 1))
+        arr_len = len(btc_ret)
         
         for lag in lags:
+            # 检查 lag 是否超过数组长度，避免空数组切片
+            if lag > 0 and lag >= arr_len:
+                corrs.append(np.nan)
+                continue
+            
             if lag > 0:
                 # ALT滞后BTC: 比较 BTC[t] 与 ALT[t+lag]
                 x = btc_ret[:-lag]
@@ -349,7 +404,12 @@ class DelayCorrelationAnalyzer:
         content = f"{self.exchange_name}\n\n{coin} 相关系数分析结果\n{df_results.to_string(index=False)}\n"
         content += f"\n差值: {diff_amount:.2f}"
         logger.debug(f"详细分析结果:\n{df_results.to_string(index=False)}")
-        sender(content, self.lark_hook)
+        
+        # 只有在 lark_hook 有效时才发送飞书通知
+        if self.lark_hook:
+            sender(content, self.lark_hook)
+        else:
+            logger.warning(f"飞书通知未发送（LARKBOT_ID 未配置）| 币种: {coin}")
     
     def one_coin_analysis(self, coin: str) -> bool:
         """
