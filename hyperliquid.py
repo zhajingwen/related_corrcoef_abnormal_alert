@@ -26,6 +26,8 @@ class DelayCorrelationAnalyzer:
     """
     # 相关系数计算所需的最小数据点数
     MIN_POINTS_FOR_CORR_CALC = 10
+    # 数据分析所需的最小数据点数
+    MIN_DATA_POINTS_FOR_ANALYSIS = 50
     
     # 异常模式检测阈值
     LONG_TERM_CORR_THRESHOLD = 0.6  # 长期相关系数阈值
@@ -49,8 +51,6 @@ class DelayCorrelationAnalyzer:
         self.btc_symbol = "BTC/USDC:USDC"
         self.btc_df_cache = {}
         self.lark_hook = f'https://open.feishu.cn/open-apis/bot/v2/hook/{lark_bot_id}'
-        # 数据分析所需的最小数据点数
-        self.MIN_DATA_POINTS_FOR_ANALYSIS = 50
 
     @staticmethod
     def _period_to_bars(period: str, timeframe: str) -> int:
@@ -74,11 +74,11 @@ class DelayCorrelationAnalyzer:
             成功返回DataFrame，失败返回None
         """
         display_name = coin or symbol
-        try:
-            return self.download_ccxt_data(symbol, period=period, timeframe=timeframe)
-        except Exception as e:
-            logger.error(f"下载 {display_name} 的 {timeframe}/{period} 数据失败: {type(e).__name__}: {str(e)}")
-            return None
+        return self._safe_execute(
+            self.download_ccxt_data,
+            symbol, period=period, timeframe=timeframe,
+            error_msg=f"下载 {display_name} 的 {timeframe}/{period} 数据失败"
+        )
     
     @retry(tries=10, delay=5, backoff=2)
     def download_ccxt_data(self, symbol: str, period: str, timeframe: str) -> pd.DataFrame:
@@ -231,11 +231,6 @@ class DelayCorrelationAnalyzer:
         # 数据验证：检查数据量
         if len(btc_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS or len(alt_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
             logger.warning(f"{coin} 的 {timeframe}/{period} 数据量不足，跳过...")
-            return None
-        
-        # 数据验证：检查必要的列
-        if 'return' not in btc_df_aligned.columns or 'return' not in alt_df_aligned.columns:
-            logger.warning(f"{coin} 的 {timeframe}/{period} 数据缺少 'return' 列，跳过...")
             return None
         
         return btc_df_aligned, alt_df_aligned
