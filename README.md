@@ -25,7 +25,7 @@
 - 🔔 **飞书告警**：检测到异常币种时自动发送告警到飞书群
 - ⏰ **定时调度**：支持定时任务调度，可配置执行时间
 - 🔄 **自动重试**：网络请求失败时自动重试，提高稳定性
-- 🏦 **多交易所支持**：支持 Binance、Hyperliquid 等多个交易所
+- 🏦 **多交易所支持**：支持 Binance、Hyperliquid、KuCoin 等多个交易所
 
 ## 技术架构
 
@@ -43,7 +43,7 @@
 related_corrcoef_abnormal_alert/
 ├── corrcoef_abnormal_alert_to_lark.py          # 主程序（Binance，带飞书告警）
 ├── corrcoef_abnormal_alert_to_lark_except_outstanding.py  # 排除持仓版本（Binance）
-├── corrcoef_abnormal_print.py                  # 仅打印结果版本
+├── corrcoef_abnormal_print.py                  # 仅打印结果版本（KuCoin）
 ├── hyperliquid.py                              # Hyperliquid永续合约分析
 ├── pyproject.toml                              # 项目配置和依赖
 ├── README.md                                   # 项目文档
@@ -51,14 +51,16 @@ related_corrcoef_abnormal_alert/
     ├── __init__.py
     ├── config.py                               # 配置文件（环境变量）
     ├── lark_bot.py                             # 飞书机器人消息发送
+    │   ├── sender()                            # 标准文本消息发送
+    │   └── sender_colourful()                  # 富文本Markdown卡片消息发送
     ├── scheduler.py                            # 定时调度装饰器
-    └── spider_failed_alert.py                  # 爬虫失败告警装饰器
+    └── spider_failed_alert.py                  # ErrorMonitor异常捕获告警装饰器
 ```
 
 ## 环境要求
 
 - Python >= 3.12
-- 支持的交易所：Binance（默认）、Hyperliquid、KuCoin 或ccxt库支持的其他交易所
+- 支持的交易所：Binance、Hyperliquid、KuCoin 或ccxt库支持的其他交易所
 
 ## 安装
 
@@ -111,7 +113,8 @@ python corrcoef_abnormal_alert_to_lark.py
 python corrcoef_abnormal_alert_to_lark_except_outstanding.py
 ```
 
-或运行仅打印版本：
+#### KuCoin 交易所分析（仅打印）
+
 ```bash
 python corrcoef_abnormal_print.py
 ```
@@ -129,7 +132,7 @@ from corrcoef_abnormal_alert_to_lark import SpuriousTEAnalyzer
 
 # 创建分析器实例
 analyzer = SpuriousTEAnalyzer(
-    exchange_name="binance",           # 交易所名称（默认binance）
+    exchange_name="binance",           # 交易所名称（默认kucoin）
     timeout=30000,                     # 请求超时时间（毫秒）
     default_timeframes=["1m", "5m"],   # 时间周期列表
     default_periods=["1d", "7d", "30d", "60d"]  # 数据周期列表
@@ -168,6 +171,7 @@ if __name__ == "__main__":
 - `numpy`: 数值计算和相关系数计算
 - `pandas`: 数据处理和DataFrame操作
 - `retry`: 网络请求失败时自动重试
+- `pyinform`: 信息论计算库（传递熵等）
 - `matplotlib`, `seaborn`: 数据可视化（可选）
 
 完整依赖列表请查看 `pyproject.toml`。
@@ -216,12 +220,45 @@ ETH/USDT相关系数分析结果
 
 ## 版本差异说明
 
-| 版本 | 交易所 | 交易对类型 | 异常模式 |
-|------|--------|------------|----------|
-| `corrcoef_abnormal_alert_to_lark.py` | Binance | USDT现货 | 短期高相关 + 长期低相关 |
-| `corrcoef_abnormal_alert_to_lark_except_outstanding.py` | Binance | USDT现货 | 同上，排除持仓 |
-| `corrcoef_abnormal_print.py` | KuCoin | USDT现货 | 短期高相关 + 长期低相关 |
-| `hyperliquid.py` | Hyperliquid | USDC永续 | 短期低相关 + 长期高相关 |
+| 版本 | 交易所 | 交易对类型 | 异常模式 | 输出方式 |
+|------|--------|------------|----------|----------|
+| `corrcoef_abnormal_alert_to_lark.py` | Binance | USDT现货 | 短期高相关 + 长期低相关 | 飞书告警 |
+| `corrcoef_abnormal_alert_to_lark_except_outstanding.py` | Binance | USDT现货 | 同上，排除持仓 | 飞书告警 |
+| `corrcoef_abnormal_print.py` | KuCoin | USDT现货 | 短期高相关 + 长期低相关 | 仅打印 |
+| `hyperliquid.py` | Hyperliquid | USDC永续合约 | 短期低相关 + 长期高相关 | 飞书告警 |
+
+### 异常模式阈值详情
+
+**Binance/KuCoin 版本（模式1）：**
+- 短期最大相关系数 > 0.6
+- 长期最大相关系数 < 0.2
+- 差值 > 0.5
+
+**Hyperliquid 版本（模式2）：**
+- 长期最大相关系数 > 0.6
+- 短期最小相关系数 < 0.3
+- 差值 > 0.5
+- 或：1天周期的 tau_star > 0
+
+## 工具模块说明
+
+### lark_bot.py - 飞书机器人
+
+- `sender(msg, url, title)`: 发送标准文本格式消息，支持链接解析
+- `sender_colourful(url, content, title)`: 发送富文本 Markdown 卡片消息
+
+### scheduler.py - 定时调度
+
+- `@scheduled_task()`: 定时调度装饰器
+  - `start_time`: 启动时间，格式 'HH:MM'
+  - `duration`: 调度间隔（秒）
+  - `weekdays`: 指定周几执行，0-6 对应周一至周日
+
+### spider_failed_alert.py - 异常监控
+
+- `@ErrorMonitor(spider_name, user)`: 异常捕获装饰器
+  - 自动捕获异常并发送飞书告警
+  - 24小时内单个任务只告警一次（Redis去重）
 
 ## 注意事项
 
@@ -229,7 +266,8 @@ ETH/USDT相关系数分析结果
 2. **数据量**：分析所有币种可能需要较长时间，取决于交易所的交易对数量
 3. **网络稳定性**：程序内置重试机制，但网络不稳定时可能需要多次重试
 4. **计算资源**：处理大量数据时需要足够的内存和计算资源
-5. **合约过滤**：程序会自动过滤合约交易对（如 `/USDT:USDT`），只分析现货交易对
+5. **合约过滤**：Binance版本会自动过滤合约交易对（如 `/USDT:USDT`），只分析现货交易对
+6. **永续合约**：Hyperliquid版本专门分析 USDC 永续合约（格式 `XXX/USDC:USDC`）
 
 ## 开发说明
 
@@ -239,8 +277,8 @@ ETH/USDT相关系数分析结果
 
 ### 错误处理
 
-- 使用 `@retry` 装饰器自动重试失败的API请求
-- 使用 `ErrorMonitor` 装饰器捕获异常并发送告警
+- 使用 `@retry` 装饰器自动重试失败的API请求（最多10次，指数退避）
+- 使用 `@ErrorMonitor` 装饰器捕获异常并发送告警（24小时去重）
 - 数据为空或格式错误时会跳过并记录警告
 - 单个币种分析失败不会影响其他币种的处理
 
