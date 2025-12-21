@@ -358,13 +358,14 @@ class SpuriousTEAnalyzer:
         1. 遍历所有时间周期（timeframes）和数据周期（periods）的组合
         2. 下载BTC和该币种的历史数据
         3. 计算每个组合下的最优延迟和最大相关系数
-        4. 识别异常模式：短期高相关但长期低相关的币种
+        4. 识别异常模式：短期低相关但长期高相关的币种
         
         异常模式识别：
-        - 模式1：短期（1分钟K线）最大相关系数 > 0.4，但长期（60天）最大相关系数 < 0.05
-          含义：短期存在很大滞后性，但长期跟随性弱，存在时间差套利空间
-        - 模式2：短期最大相关系数 < 0.11，且长期最大相关系数 < 0.05
-          含义：币种与BTC相关性极低，可能存在独立走势或异常行为
+        - 主要模式：长期最大相关系数 > 0.6，且短期最小相关系数 < 0.3，且差值 > 0.5
+          含义：短期存在明显滞后性（低相关），但长期与BTC有较强的跟随性（高相关），
+          存在锚定BTC价格走势的时间差套利空间
+        - 额外触发条件：当 '1d' period 的最优延迟（tau_star）大于0时，也会触发输出
+          含义：即使不满足主要模式，如果短期存在明显滞后，也可能存在套利机会
         
         输出：
         - 如果检测到异常模式，会输出详细的相关系数分析结果表格
@@ -483,9 +484,9 @@ class SpuriousTEAnalyzer:
         long_term_corrs = [x[0] for x in related_matrix_list if x[2] in long_periods]
         
         if short_term_corrs and long_term_corrs:
-            min_short_corr = min(short_term_corrs)  # 短期最大相关系数
+            min_short_corr = min(short_term_corrs)  # 短期最小相关系数
             max_long_corr = max(long_term_corrs)    # 长期最大相关系数
-            logger.info(f'max_short_corr: {min_short_corr}, max_long_corr: {max_long_corr}')
+            logger.info(f'min_short_corr: {min_short_corr}, max_long_corr: {max_long_corr}')
             
             # 异常模式：短期低相关但长期高相关
             # 这个数据状态表示短期K线存在很大的滞后性，但是长期相关性较强
@@ -521,23 +522,18 @@ class SpuriousTEAnalyzer:
     
     def run(self):
         """
-        主运行方法，分析交易所中所有指定计价货币的交易对
+        主运行方法，分析交易所中所有USDC永续合约交易对
         
         功能说明：
         1. 加载交易所的所有市场信息
-        2. 筛选出指定计价货币的交易对（默认USDC）
+        2. 筛选出USDC永续合约交易对（格式为 XXX/USDC:USDC）
         3. 对每个交易对进行分析，识别异常模式
         4. 在每次分析之间添加延迟，避免API请求过于频繁
-        
-        Args:
-            quote_currency (str): 计价货币，默认为 "USDC"
-                                只分析以该货币计价的交易对
-                                例如："USDC"会分析所有XXX/USDC交易对
         
         处理流程：
         1. 调用exchange.load_markets()加载所有市场信息
         2. 遍历所有交易对
-        3. 检查交易对的quote字段是否匹配quote_currency
+        3. 检查交易对名称是否包含 '/USDC:USDC'（永续合约格式）
         4. 对匹配的交易对调用one_coin_analysis()进行分析
         5. 每次分析后等待1秒，避免触发API限流
         
