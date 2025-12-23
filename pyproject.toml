@@ -11,6 +11,7 @@ dependencies = [
     "numpy>=2.3.4",
     "pandas>=2.3.3",
     "pyinform>=0.2.0",
+    "redis>=7.1.0",
     "retry>=0.9.2",
     "seaborn>=0.13.2",
 ]

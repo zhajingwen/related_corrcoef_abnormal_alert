@@ -82,7 +82,11 @@ class DelayCorrelationAnalyzer:
             default_periods: 数据周期列表，如 ["1d", "7d", "30d", "60d"]
         """
         self.exchange_name = exchange_name
-        self.exchange = getattr(ccxt, exchange_name)({"timeout": timeout})
+        self.exchange = getattr(ccxt, exchange_name)({
+            "timeout": timeout,
+            "enableRateLimit": True,
+            "rateLimit": 1000
+        })
         self.timeframes = default_timeframes or ["1m", "5m"]
         self.periods = default_periods or ["1d", "7d", "30d", "60d"]
         self.btc_symbol = "BTC/USDC:USDC"
