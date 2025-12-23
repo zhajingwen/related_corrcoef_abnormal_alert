@@ -85,7 +85,7 @@ class DelayCorrelationAnalyzer:
         self.exchange = getattr(ccxt, exchange_name)({
             "timeout": timeout,
             "enableRateLimit": True,
-            "rateLimit": 1000
+            "rateLimit": 1500
         })
         self.timeframes = default_timeframes or ["1m", "5m"]
         self.periods = default_periods or ["1d", "7d", "30d", "60d"]
@@ -197,6 +197,10 @@ class DelayCorrelationAnalyzer:
             
             if len(ohlcv) < 1500 or fetched >= target_bars:
                 break
+            
+            # 请求间隔：添加 1.5 秒延迟，确保即使 ccxt 内部发起多次请求也有足够间隔
+            # 对 Hyperliquid 来说，1.5 秒是安全的间隔
+            time.sleep(1.5)
 
         if not all_rows:
             return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume", "return", "volume_usd"])
@@ -488,7 +492,8 @@ class DelayCorrelationAnalyzer:
             if idx in milestones:
                 logger.info(f"分析进度: {idx}/{total} ({idx * 100 // total}%)")
             
-            time.sleep(1)
+            # 币种之间的间隔：增加到 2 秒，避免触发 Hyperliquid 的限流
+            time.sleep(2)
         
         elapsed = time.time() - start_time
         logger.info(

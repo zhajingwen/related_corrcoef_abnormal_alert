@@ -26,7 +26,7 @@ class RESTClient:
         timeout: int = 30000,
         cache: Optional[SQLiteCache] = None,
         enable_rate_limit: bool = True,
-        rate_limit_ms: int = 500
+        rate_limit_ms: int = 1500
     ):
         """
         初始化 REST 客户端
@@ -79,7 +79,6 @@ class RESTClient:
         bars_per_day = int(24 * 60 / timeframe_minutes)
         return days * bars_per_day
     
-    @retry(tries=10, delay=5, backoff=2, logger=logger)
     def _fetch_ohlcv_raw(
         self,
         symbol: str,
@@ -88,7 +87,7 @@ class RESTClient:
         limit: int = 1500
     ) -> list:
         """
-        从交易所获取原始 OHLCV 数据（带重试）
+        从交易所获取原始 OHLCV 数据（带重试和 429 错误处理）
         
         Args:
             symbol: 交易对
@@ -98,8 +97,56 @@ class RESTClient:
         
         Returns:
             OHLCV 数据列表 [[timestamp, open, high, low, close, volume], ...]
+        
+        Raises:
+            Exception: 如果多次重试后仍然失败
         """
-        return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
+        max_retries = 10
+        base_delay = 5  # 基础延迟（秒）
+        
+        for attempt in range(max_retries):
+            try:
+                return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
+            except ccxt.NetworkError as e:
+                # 检查是否是 429 错误
+                error_str = str(e).lower()
+                if '429' in error_str or 'too many requests' in error_str or 'rate limit' in error_str:
+                    # 429 错误：使用指数退避，等待更长时间
+                    wait_time = base_delay * (2 ** attempt)  # 5, 10, 20, 40, ...
+                    wait_time = min(wait_time, 60)  # 最多等待 60 秒
+                    logger.warning(
+                        f"遇到 429 限流错误 | {symbol} | {timeframe} | "
+                        f"第 {attempt + 1}/{max_retries} 次重试 | 等待 {wait_time} 秒"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # 其他网络错误：使用标准重试策略
+                    if attempt < max_retries - 1:
+                        wait_time = base_delay * (attempt + 1)
+                        logger.warning(
+                            f"网络错误 | {symbol} | {timeframe} | "
+                            f"第 {attempt + 1}/{max_retries} 次重试 | 等待 {wait_time} 秒 | {e}"
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise
+            except Exception as e:
+                # 其他异常：最后一次尝试时直接抛出
+                if attempt < max_retries - 1:
+                    wait_time = base_delay * (attempt + 1)
+                    logger.warning(
+                        f"请求失败 | {symbol} | {timeframe} | "
+                        f"第 {attempt + 1}/{max_retries} 次重试 | 等待 {wait_time} 秒 | {e}"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise
+        
+        # 如果所有重试都失败，抛出异常
+        raise Exception(f"获取 OHLCV 数据失败，已重试 {max_retries} 次 | {symbol} | {timeframe}")
     
     def fetch_ohlcv(
         self,
@@ -216,8 +263,9 @@ class RESTClient:
             if len(ohlcv) < 1500 or fetched >= target_bars:
                 break
             
-            # 请求间隔
-            time.sleep(self.rate_limit_ms / 1000)
+            # 请求间隔：使用固定的 1.5-2 秒延迟，确保即使 ccxt 内部发起多次请求也有足够间隔
+            # 对 Hyperliquid 来说，1.5-2 秒是安全的间隔
+            time.sleep(1.5)
         
         if not all_rows:
             return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
@@ -253,7 +301,9 @@ class RESTClient:
                 break
             
             current_since = ohlcv[-1][0] + 1
-            time.sleep(self.rate_limit_ms / 1000)
+            # 请求间隔：使用固定的 1.5-2 秒延迟，确保即使 ccxt 内部发起多次请求也有足够间隔
+            # 对 Hyperliquid 来说，1.5-2 秒是安全的间隔
+            time.sleep(1.5)
         
         if not all_rows:
             return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])

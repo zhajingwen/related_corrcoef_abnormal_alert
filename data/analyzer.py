@@ -425,7 +425,8 @@ class DelayCorrelationAnalyzer:
                 if idx in milestones:
                     logger.info(f"分析进度: {idx}/{total} ({idx * 100 // total}%)")
                 
-                time.sleep(0.5)  # 降低请求频率
+                # 币种之间的间隔：增加到 2 秒，避免触发 Hyperliquid 的限流
+                time.sleep(2)
             
             elapsed = time.time() - start_time
             logger.info(
