@@ -321,6 +321,8 @@ class DelayCorrelationAnalyzer:
         Returns:
             成功返回对齐后的 (btc_df, alt_df)，失败返回 None
         """
+        logger.info(f"币种: {coin} | {timeframe}/{period} btc_df: {btc_df.head()}, length: {len(btc_df)}")
+        logger.info(f"币种: {coin} | {timeframe}/{period} alt_df: {alt_df.head()}, length: {len(alt_df)}")
         # 对齐时间索引
         common_idx = btc_df.index.intersection(alt_df.index)
         btc_df_aligned = btc_df.loc[common_idx]
@@ -464,7 +466,7 @@ class DelayCorrelationAnalyzer:
                     f"时间周期: {self.timeframes} | 数据周期: {self.periods}")
         
         all_coins = self.exchange.load_markets()
-        usdc_coins = [c for c in all_coins if '/USDC:USDC' in c]
+        usdc_coins = [c for c in all_coins if '/USDC:USDC' in c and c != self.btc_symbol]
         total = len(usdc_coins)
         anomaly_count = 0
         skip_count = 0
