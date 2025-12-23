@@ -12,7 +12,7 @@ from utils.lark_bot import sender
 from utils.config import lark_bot_id
 
 
-def setup_logging(log_file="hyperliquid.log", level=logging.INFO):
+def setup_logging(log_file="hyperliquid.log", level=logging.DEBUG):
     """
     配置日志系统，支持控制台和文件输出
     
