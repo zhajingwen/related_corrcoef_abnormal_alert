@@ -279,9 +279,9 @@ class DelayCorrelationAnalyzer:
             logger.debug(f"BTC数据缓存命中 | {timeframe}/{period}")
             return self.btc_df_cache[cache_key].copy()
         
-        # 对于1m/1d和1m/7d，尝试从1m/30d数据中切片
-        if timeframe == "1m" and period in ["1d", "7d"]:
-            source_cache_key = ("1m", "30d")
+        # 对于1m/1d、1m/7d、5m/1d和5m/7d，尝试从对应timeframe的30d数据中切片
+        if timeframe in ["1m", "5m"] and period in ["1d", "7d"]:
+            source_cache_key = (timeframe, "30d")
             if source_cache_key in self.btc_df_cache:
                 logger.debug(f"BTC数据从30d切片生成 | {timeframe}/{period}")
                 source_df = self.btc_df_cache[source_cache_key]
@@ -319,7 +319,7 @@ class DelayCorrelationAnalyzer:
         """
         获取山寨币数据（带缓存和智能切片）
         
-        对于1m/1d和1m/7d，从1m/30d数据中本地切片生成，减少API请求
+        对于1m/1d、1m/7d、5m/1d和5m/7d，从对应timeframe的30d数据中本地切片生成，减少API请求
         
         Args:
             symbol: 交易对名称
@@ -338,9 +338,9 @@ class DelayCorrelationAnalyzer:
             logger.debug(f"山寨币数据缓存命中 | {display_name} | {timeframe}/{period}")
             return self.alt_df_cache[cache_key].copy()
         
-        # 对于1m/1d和1m/7d，尝试从1m/30d数据中切片
-        if timeframe == "1m" and period in ["1d", "7d"]:
-            source_cache_key = (symbol, "1m", "30d")
+        # 对于1m/1d、1m/7d、5m/1d和5m/7d，尝试从对应timeframe的30d数据中切片
+        if timeframe in ["1m", "5m"] and period in ["1d", "7d"]:
+            source_cache_key = (symbol, timeframe, "30d")
             if source_cache_key in self.alt_df_cache:
                 logger.debug(f"山寨币数据从30d切片生成 | {display_name} | {timeframe}/{period}")
                 source_df = self.alt_df_cache[source_cache_key]
