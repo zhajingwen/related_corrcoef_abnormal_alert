@@ -69,13 +69,13 @@ class DelayCorrelationAnalyzer:
 
     # 异常模式检测阈值
     LONG_TERM_CORR_THRESHOLD = 0.6  # 长期相关系数阈值
-    SHORT_TERM_CORR_THRESHOLD = 0.3  # 短期相关系数阈值
-    CORR_DIFF_THRESHOLD = 0.5  # 相关系数差值阈值
+    SHORT_TERM_CORR_THRESHOLD = 0.4  # 短期相关系数阈值
+    CORR_DIFF_THRESHOLD = 0.3  # 相关系数差值阈值
 
     # ========== 新增：异常值处理配置 ==========
     # Winsorization 分位数配置
-    WINSORIZE_LOWER_PERCENTILE = 1   # 下分位数（1%）
-    WINSORIZE_UPPER_PERCENTILE = 99  # 上分位数（91%）
+    WINSORIZE_LOWER_PERCENTILE = 0.3   # 下分位数（0.3%）
+    WINSORIZE_UPPER_PERCENTILE = 99.7  # 上分位数（99.7%）
     # 是否启用异常值处理（可配置开关）
     ENABLE_OUTLIER_TREATMENT = True
 
