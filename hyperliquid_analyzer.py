@@ -46,6 +46,7 @@ def setup_logging(log_file="hyperliquid.log", level=logging.DEBUG):
     
     # 配置 logger
     log.setLevel(level)
+    log.propagate = False  # 阻止日志传播到根 logger，避免重复打印
     log.addHandler(console_handler)
     log.addHandler(file_handler)
     
@@ -321,8 +322,6 @@ class DelayCorrelationAnalyzer:
         Returns:
             成功返回对齐后的 (btc_df, alt_df)，失败返回 None
         """
-        logger.info(f"币种: {coin} | {timeframe}/{period} btc_df: {btc_df.head()}, length: {len(btc_df)}")
-        logger.info(f"币种: {coin} | {timeframe}/{period} alt_df: {alt_df.head()}, length: {len(alt_df)}")
         # 对齐时间索引
         common_idx = btc_df.index.intersection(alt_df.index)
         btc_df_aligned = btc_df.loc[common_idx]
@@ -331,6 +330,8 @@ class DelayCorrelationAnalyzer:
         # 数据验证：检查数据量
         if len(btc_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS or len(alt_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
             logger.warning(f"数据量不足，跳过 | 币种: {coin} | {timeframe}/{period}")
+            logger.info(f"币种: {coin} | {timeframe}/{period} btc_df: {btc_df.head()}, length: {len(btc_df)}")
+            logger.info(f"币种: {coin} | {timeframe}/{period} alt_df: {alt_df.head()}, length: {len(alt_df)}")
             return None
         
         return btc_df_aligned, alt_df_aligned
