@@ -72,15 +72,14 @@ class DelayCorrelationAnalyzer:
     SHORT_TERM_CORR_THRESHOLD = 0.3  # 短期相关系数阈值
     CORR_DIFF_THRESHOLD = 0.5  # 相关系数差值阈值
     
-    def __init__(self, exchange_name="kucoin", timeout=30000, default_timeframes=None, default_periods=None):
+    def __init__(self, exchange_name="kucoin", timeout=30000, default_combinations=None):
         """
         初始化分析器
         
         Args:
             exchange_name: 交易所名称，支持ccxt库支持的所有交易所
             timeout: 请求超时时间（毫秒）
-            default_timeframes: K线颗粒度列表，如 ["1m", "5m"]
-            default_periods: 数据周期列表，如 ["1d", "7d", "30d"]
+            default_combinations: K线组合列表，如 [("5m", "7d"), ("1m", "1d")]
         """
         self.exchange_name = exchange_name
         self.exchange = getattr(ccxt, exchange_name)({
@@ -88,8 +87,8 @@ class DelayCorrelationAnalyzer:
             "enableRateLimit": True,
             "rateLimit": 1500
         })
-        self.timeframes = default_timeframes or ["1m", "5m"]
-        self.periods = default_periods or ["1d", "7d", "30d"]
+        # 只保留两个组合：5分钟K线7天，1分钟K线1天
+        self.combinations = default_combinations or [("5m", "7d"), ("1m", "1d")]
         self.btc_symbol = "BTC/USDC:USDC"
         self.btc_df_cache = {}
         self.alt_df_cache = {}  # 山寨币数据缓存
@@ -274,40 +273,11 @@ class DelayCorrelationAnalyzer:
         return tau_star, corrs, max_related_matrix
     
     def _get_btc_data(self, timeframe: str, period: str) -> pd.DataFrame | None:
-        """获取BTC数据（带缓存和智能切片）"""
+        """获取BTC数据（带缓存）"""
         cache_key = (timeframe, period)
         if cache_key in self.btc_df_cache:
             logger.debug(f"BTC数据缓存命中 | {timeframe}/{period}")
             return self.btc_df_cache[cache_key].copy()
-        
-        # 对于1m/1d、1m/7d、5m/1d和5m/7d，尝试从对应timeframe的30d数据中切片
-        if timeframe in ["1m", "5m"] and period in ["1d", "7d"]:
-            source_cache_key = (timeframe, "30d")
-            if source_cache_key in self.btc_df_cache:
-                logger.debug(f"BTC数据从30d切片生成 | {timeframe}/{period}")
-                source_df = self.btc_df_cache[source_cache_key]
-                target_bars = self._period_to_bars(period, timeframe)
-                sliced_df = source_df.tail(target_bars).copy()
-                # 重新计算return列
-                sliced_df['return'] = sliced_df['Close'].pct_change().fillna(0)
-                sliced_df['volume_usd'] = sliced_df['Volume'] * sliced_df['Close']
-                # 缓存切片后的数据
-                self.btc_df_cache[cache_key] = sliced_df
-                return sliced_df
-            else:
-                # 如果没有30d数据，先下载30d数据并缓存
-                logger.debug(f"BTC数据首次下载并缓存30d数据，用于后续切片生成1d/7d | {timeframe}/{period}")
-                btc_30d_df = self._safe_download(self.btc_symbol, "30d", timeframe)
-                if btc_30d_df is None:
-                    return None
-                self.btc_df_cache[source_cache_key] = btc_30d_df
-                # 从30d数据中切片
-                target_bars = self._period_to_bars(period, timeframe)
-                sliced_df = btc_30d_df.tail(target_bars).copy()
-                sliced_df['return'] = sliced_df['Close'].pct_change().fillna(0)
-                sliced_df['volume_usd'] = sliced_df['Volume'] * sliced_df['Close']
-                self.btc_df_cache[cache_key] = sliced_df
-                return sliced_df
         
         logger.debug(f"BTC数据缓存未命中，开始下载 | {timeframe}/{period}")
         btc_df = self._safe_download(self.btc_symbol, period, timeframe)
@@ -318,9 +288,7 @@ class DelayCorrelationAnalyzer:
     
     def _get_alt_data(self, symbol: str, period: str, timeframe: str, coin: str = None) -> pd.DataFrame | None:
         """
-        获取山寨币数据（带缓存和智能切片）
-        
-        对于1m/1d、1m/7d、5m/1d和5m/7d，从对应timeframe的30d数据中本地切片生成，减少API请求
+        获取山寨币数据（带缓存）
         
         Args:
             symbol: 交易对名称
@@ -344,56 +312,7 @@ class DelayCorrelationAnalyzer:
             logger.debug(f"山寨币数据缓存命中 | 币种: {display_name} | {timeframe}/{period}")
             return cached_df.copy()
         
-        # 对于1m/1d、1m/7d、5m/1d和5m/7d，尝试从对应timeframe的30d数据中切片
-        if timeframe in ["1m", "5m"] and period in ["1d", "7d"]:
-            source_cache_key = (symbol, timeframe, "30d")
-            if source_cache_key in self.alt_df_cache:
-                source_df = self.alt_df_cache[source_cache_key]
-                # 检查源数据是否为空
-                if source_df.empty or len(source_df) == 0:
-                    logger.warning(f"山寨币30d源数据为空，无法切片 | 币种: {display_name} | {timeframe}/{period}")
-                    return None
-                logger.debug(f"山寨币数据从30d切片生成 | 币种: {display_name} | {timeframe}/{period}")
-                target_bars = self._period_to_bars(period, timeframe)
-                sliced_df = source_df.tail(target_bars).copy()
-                # 重新计算return列
-                sliced_df['return'] = sliced_df['Close'].pct_change().fillna(0)
-                sliced_df['volume_usd'] = sliced_df['Volume'] * sliced_df['Close']
-                # 验证切片后的数据量
-                if len(sliced_df) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
-                    logger.warning(f"山寨币切片后数据量不足，不缓存 | 币种: {display_name} | {timeframe}/{period} | 数据量: {len(sliced_df)}")
-                    return None
-                # 缓存切片后的数据
-                self.alt_df_cache[cache_key] = sliced_df
-                return sliced_df
-            else:
-                # 如果没有30d数据，先下载30d数据并缓存
-                logger.debug(f"山寨币数据首次下载并缓存30d数据，用于后续切片生成1d/7d | 币种: {display_name} | {timeframe}/{period}")
-                alt_30d_df = self._safe_download(symbol, "30d", timeframe, coin)
-                if alt_30d_df is None:
-                    return None
-                # 验证下载的数据是否为空
-                if alt_30d_df.empty or len(alt_30d_df) == 0:
-                    logger.warning(f"山寨币30d数据不存在（空数据），不缓存 | 币种: {display_name} | {timeframe}/30d")
-                    return None
-                # 验证数据量是否足够
-                if len(alt_30d_df) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
-                    logger.warning(f"山寨币30d数据量不足，不缓存 | 币种: {display_name} | {timeframe}/30d | 数据量: {len(alt_30d_df)}")
-                    return None
-                self.alt_df_cache[source_cache_key] = alt_30d_df
-                # 从30d数据中切片
-                target_bars = self._period_to_bars(period, timeframe)
-                sliced_df = alt_30d_df.tail(target_bars).copy()
-                sliced_df['return'] = sliced_df['Close'].pct_change().fillna(0)
-                sliced_df['volume_usd'] = sliced_df['Volume'] * sliced_df['Close']
-                # 验证切片后的数据量
-                if len(sliced_df) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
-                    logger.warning(f"山寨币切片后数据量不足，不缓存 | 币种: {display_name} | {timeframe}/{period} | 数据量: {len(sliced_df)}")
-                    return None
-                self.alt_df_cache[cache_key] = sliced_df
-                return sliced_df
-        
-        # 对于其他组合，直接下载并缓存
+        # 直接下载并缓存
         logger.debug(f"山寨币数据缓存未命中，开始下载 | 币种: {display_name} | {timeframe}/{period}")
         alt_df = self._safe_download(symbol, period, timeframe, coin)
         if alt_df is None:
@@ -498,15 +417,15 @@ class DelayCorrelationAnalyzer:
         检测异常模式：短期低相关但长期高相关
         
         异常模式判断阈值：
-        - 长期相关系数 > LONG_TERM_CORR_THRESHOLD：长期与BTC有较强跟随性
-        - 短期相关系数 < SHORT_TERM_CORR_THRESHOLD：短期存在明显滞后
+        - 长期相关系数 > LONG_TERM_CORR_THRESHOLD：长期与BTC有较强跟随性（7d对应5m）
+        - 短期相关系数 < SHORT_TERM_CORR_THRESHOLD：短期存在明显滞后（1d对应1m）
         - 差值 > CORR_DIFF_THRESHOLD：短期和长期差异足够显著
         
         Returns:
             (is_anomaly, diff_amount): 是否异常模式、相关系数差值
         """
         short_periods = ['1d']
-        long_periods = ['7d', '30d']
+        long_periods = ['7d']
         
         short_term_corrs = [x[0] for x in results if x[2] in short_periods]
         long_term_corrs = [x[0] for x in results if x[2] in long_periods]
@@ -561,26 +480,26 @@ class DelayCorrelationAnalyzer:
         results = []
         first_combination_checked = False
         
-        for timeframe in self.timeframes:
-            for period in self.periods:
-                # 对于第一个组合，先检查数据是否存在
-                if not first_combination_checked:
-                    first_combination_checked = True
-                    # 尝试获取第一个组合的数据，检查是否为空
-                    alt_df = self._get_alt_data(coin, period, timeframe, coin)
-                    if alt_df is None:
-                        # 数据不存在，提前退出所有组合
-                        logger.warning(f"币种数据不存在（第一个组合检查无数据），跳过后续所有组合 | 币种: {coin} | {timeframe}/{period}")
-                        return False
-                
-                result = self._safe_execute(
-                    self._analyze_single_combination,
-                    coin, timeframe, period,
-                    error_msg=f"处理 {coin} 的 {timeframe}/{period} 时发生异常"
-                )
-                
-                if result is not None:
-                    results.append(result)
+        # 直接遍历预定义的组合列表：5m/7d 和 1m/1d
+        for timeframe, period in self.combinations:
+            # 对于第一个组合，先检查数据是否存在
+            if not first_combination_checked:
+                first_combination_checked = True
+                # 尝试获取第一个组合的数据，检查是否为空
+                alt_df = self._get_alt_data(coin, period, timeframe, coin)
+                if alt_df is None:
+                    # 数据不存在，提前退出所有组合
+                    logger.warning(f"币种数据不存在（第一个组合检查无数据），跳过后续所有组合 | 币种: {coin} | {timeframe}/{period}")
+                    return False
+            
+            result = self._safe_execute(
+                self._analyze_single_combination,
+                coin, timeframe, period,
+                error_msg=f"处理 {coin} 的 {timeframe}/{period} 时发生异常"
+            )
+            
+            if result is not None:
+                results.append(result)
         
         # 过滤 NaN 并按相关系数降序排序
         valid_results = [(corr, tf, p, ts) for corr, tf, p, ts in results if not np.isnan(corr)]
@@ -606,7 +525,7 @@ class DelayCorrelationAnalyzer:
     def run(self):
         """分析交易所中所有USDC永续合约交易对"""
         logger.info(f"启动分析器 | 交易所: {self.exchange_name} | "
-                    f"时间周期: {self.timeframes} | 数据周期: {self.periods}")
+                    f"K线组合: {self.combinations}")
         
         all_coins = self.exchange.load_markets()
         usdc_coins = [c for c in all_coins if '/USDC:USDC' in c and c != self.btc_symbol]
