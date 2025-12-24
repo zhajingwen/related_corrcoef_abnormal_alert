@@ -217,7 +217,7 @@ class DelayCorrelationAnalyzer:
         return df
     
     @staticmethod
-    def find_optimal_delay(btc_ret, alt_ret, max_lag=48):
+    def find_optimal_delay(btc_ret, alt_ret, max_lag=3):
         """
         寻找最优延迟 τ*
         
@@ -259,7 +259,7 @@ class DelayCorrelationAnalyzer:
             related_matrix = np.corrcoef(x[:m], y[:m])[0, 1]
             corrs.append(np.nan if np.isnan(related_matrix) else related_matrix)
         
-        # 找出最大相关系数对应的延迟值
+        # 找出最大相关系数对应的延迟值（匹配性最好的延迟窗口长度）
         valid_corrs = np.array(corrs)
         valid_mask = ~np.isnan(valid_corrs)
         if valid_mask.any():
