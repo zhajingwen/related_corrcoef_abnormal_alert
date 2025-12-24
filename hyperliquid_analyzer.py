@@ -80,7 +80,7 @@ class DelayCorrelationAnalyzer:
             exchange_name: 交易所名称，支持ccxt库支持的所有交易所
             timeout: 请求超时时间（毫秒）
             default_timeframes: K线颗粒度列表，如 ["1m", "5m"]
-            default_periods: 数据周期列表，如 ["1d", "7d", "30d", "60d"]
+            default_periods: 数据周期列表，如 ["1d", "7d", "30d"]
         """
         self.exchange_name = exchange_name
         self.exchange = getattr(ccxt, exchange_name)({
@@ -89,7 +89,7 @@ class DelayCorrelationAnalyzer:
             "rateLimit": 1500
         })
         self.timeframes = default_timeframes or ["1m", "5m"]
-        self.periods = default_periods or ["1d", "7d", "30d", "60d"]
+        self.periods = default_periods or ["1d", "7d", "30d"]
         self.btc_symbol = "BTC/USDC:USDC"
         self.btc_df_cache = {}
         
@@ -173,7 +173,7 @@ class DelayCorrelationAnalyzer:
         
         Args:
             symbol: 交易对名称，如 "BTC/USDC"
-            period: 数据周期，如 "60d"
+            period: 数据周期，如 "30d"
             timeframe: K线时间周期，如 "5m"
         
         Returns:
@@ -380,7 +380,7 @@ class DelayCorrelationAnalyzer:
             (is_anomaly, diff_amount): 是否异常模式、相关系数差值
         """
         short_periods = ['1d']
-        long_periods = ['7d', '30d', '60d']
+        long_periods = ['7d', '30d']
         
         short_term_corrs = [x[0] for x in results if x[2] in short_periods]
         long_term_corrs = [x[0] for x in results if x[2] in long_periods]
