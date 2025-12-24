@@ -378,10 +378,10 @@ class DelayCorrelationAnalyzer:
         # ========== 2. 异常值处理（如果启用）==========
         if enable_outlier_treatment:
             btc_ret_processed = DelayCorrelationAnalyzer._winsorize_returns(
-                btc_ret, log_stats=True
+                btc_ret, log_stats=False
             )
             alt_ret_processed = DelayCorrelationAnalyzer._winsorize_returns(
-                alt_ret, log_stats=True
+                alt_ret, log_stats=False
             )
         else:
             btc_ret_processed = btc_ret
