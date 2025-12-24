@@ -420,7 +420,7 @@ class DelayCorrelationAnalyzer:
         # 数据验证：检查数据量
         if len(btc_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS or len(alt_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
             logger.warning(f"数据量不足，跳过 | 币种: {coin} | {timeframe}/{period} | BTC数据量: {len(btc_df_aligned)} | 山寨币数据量: {len(alt_df_aligned)}")
-            logger.debug(f"数据详情 | BTC: {btc_df.head()}, length: {len(btc_df)} | 山寨币: {alt_df.head()}, length: {len(alt_df)}")
+            logger.debug(f"币种: {coin} | {timeframe}/{period} 数据详情 | BTC: {btc_df.head()}, length: {len(btc_df)} | 山寨币: {alt_df.head()}, length: {len(alt_df)}")
             return None
         
         return btc_df_aligned, alt_df_aligned
@@ -432,8 +432,6 @@ class DelayCorrelationAnalyzer:
         Returns:
             成功返回 (correlation, timeframe, period, tau_star)，失败返回 None
         """
-        logger.debug(f"下载数据 | 币种: {coin} | {timeframe}/{period}")
-        
         btc_df = self._get_btc_data(timeframe, period)
         if btc_df is None:
             return None
@@ -547,7 +545,11 @@ class DelayCorrelationAnalyzer:
             self._output_results(coin, valid_results, diff_amount)
             return True
         else:
-            logger.debug(f"常规数据 | 币种: {coin}")
+            # 计算相关系数统计信息
+            corrs = [r[0] for r in valid_results]
+            min_corr = min(corrs) if corrs else 0
+            max_corr = max(corrs) if corrs else 0
+            logger.debug(f"常规数据 | 币种: {coin} | 相关系数范围: {min_corr:.4f} ~ {max_corr:.4f}")
             return False
     
     def run(self):
