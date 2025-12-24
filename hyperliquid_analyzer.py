@@ -383,9 +383,15 @@ class DelayCorrelationAnalyzer:
         
         return btc_df_aligned, alt_df_aligned
     
-    def _analyze_single_combination(self, coin: str, timeframe: str, period: str) -> tuple | None:
+    def _analyze_single_combination(self, coin: str, timeframe: str, period: str, alt_df: pd.DataFrame | None = None) -> tuple | None:
         """
         分析单个 timeframe/period 组合
+        
+        Args:
+            coin: 币种交易对名称
+            timeframe: K线时间周期
+            period: 数据周期
+            alt_df: 可选的预获取的山寨币数据，如果提供则直接使用，否则调用 _get_alt_data 获取
         
         Returns:
             成功返回 (correlation, timeframe, period, tau_star)，失败返回 None
@@ -394,7 +400,9 @@ class DelayCorrelationAnalyzer:
         if btc_df is None:
             return None
         
-        alt_df = self._get_alt_data(coin, period, timeframe, coin)
+        # 如果提供了预获取的数据，直接使用；否则调用 _get_alt_data 获取
+        if alt_df is None:
+            alt_df = self._get_alt_data(coin, period, timeframe, coin)
         if alt_df is None:
             return None
         
@@ -479,6 +487,7 @@ class DelayCorrelationAnalyzer:
         """
         results = []
         first_combination_checked = False
+        first_alt_df = None  # 保存第一个组合获取的数据，避免重复调用
         
         # 直接遍历预定义的组合列表：5m/7d 和 1m/1d
         for timeframe, period in self.combinations:
@@ -486,17 +495,24 @@ class DelayCorrelationAnalyzer:
             if not first_combination_checked:
                 first_combination_checked = True
                 # 尝试获取第一个组合的数据，检查是否为空
-                alt_df = self._get_alt_data(coin, period, timeframe, coin)
-                if alt_df is None:
+                first_alt_df = self._get_alt_data(coin, period, timeframe, coin)
+                if first_alt_df is None:
                     # 数据不存在，提前退出所有组合
                     logger.warning(f"币种数据不存在（第一个组合检查无数据），跳过后续所有组合 | 币种: {coin} | {timeframe}/{period}")
                     return False
-            
-            result = self._safe_execute(
-                self._analyze_single_combination,
-                coin, timeframe, period,
-                error_msg=f"处理 {coin} 的 {timeframe}/{period} 时发生异常"
-            )
+                # 使用预获取的数据进行分析，避免重复调用
+                result = self._safe_execute(
+                    self._analyze_single_combination,
+                    coin, timeframe, period, first_alt_df,
+                    error_msg=f"处理 {coin} 的 {timeframe}/{period} 时发生异常"
+                )
+            else:
+                # 后续组合正常调用，不传入预获取数据
+                result = self._safe_execute(
+                    self._analyze_single_combination,
+                    coin, timeframe, period,
+                    error_msg=f"处理 {coin} 的 {timeframe}/{period} 时发生异常"
+                )
             
             if result is not None:
                 results.append(result)
