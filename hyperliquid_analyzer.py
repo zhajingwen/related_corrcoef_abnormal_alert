@@ -92,6 +92,7 @@ class DelayCorrelationAnalyzer:
         self.periods = default_periods or ["1d", "7d", "30d"]
         self.btc_symbol = "BTC/USDC:USDC"
         self.btc_df_cache = {}
+        self.alt_df_cache = {}  # 山寨币数据缓存
         
         # 检查 lark_bot_id 是否有效
         if not lark_bot_id:
@@ -272,11 +273,40 @@ class DelayCorrelationAnalyzer:
         return tau_star, corrs, max_related_matrix
     
     def _get_btc_data(self, timeframe: str, period: str) -> pd.DataFrame | None:
-        """获取BTC数据（带缓存）"""
+        """获取BTC数据（带缓存和智能切片）"""
         cache_key = (timeframe, period)
         if cache_key in self.btc_df_cache:
             logger.debug(f"BTC数据缓存命中 | {timeframe}/{period}")
             return self.btc_df_cache[cache_key].copy()
+        
+        # 对于1m/1d和1m/7d，尝试从1m/30d数据中切片
+        if timeframe == "1m" and period in ["1d", "7d"]:
+            source_cache_key = ("1m", "30d")
+            if source_cache_key in self.btc_df_cache:
+                logger.debug(f"BTC数据从30d切片生成 | {timeframe}/{period}")
+                source_df = self.btc_df_cache[source_cache_key]
+                target_bars = self._period_to_bars(period, timeframe)
+                sliced_df = source_df.tail(target_bars).copy()
+                # 重新计算return列
+                sliced_df['return'] = sliced_df['Close'].pct_change().fillna(0)
+                sliced_df['volume_usd'] = sliced_df['Volume'] * sliced_df['Close']
+                # 缓存切片后的数据
+                self.btc_df_cache[cache_key] = sliced_df
+                return sliced_df
+            else:
+                # 如果没有30d数据，先下载30d数据并缓存
+                logger.debug(f"BTC数据缓存未命中，下载30d数据用于切片 | {timeframe}/{period}")
+                btc_30d_df = self._safe_download(self.btc_symbol, "30d", timeframe)
+                if btc_30d_df is None:
+                    return None
+                self.btc_df_cache[source_cache_key] = btc_30d_df
+                # 从30d数据中切片
+                target_bars = self._period_to_bars(period, timeframe)
+                sliced_df = btc_30d_df.tail(target_bars).copy()
+                sliced_df['return'] = sliced_df['Close'].pct_change().fillna(0)
+                sliced_df['volume_usd'] = sliced_df['Volume'] * sliced_df['Close']
+                self.btc_df_cache[cache_key] = sliced_df
+                return sliced_df
         
         logger.debug(f"BTC数据缓存未命中，开始下载 | {timeframe}/{period}")
         btc_df = self._safe_download(self.btc_symbol, period, timeframe)
@@ -284,6 +314,66 @@ class DelayCorrelationAnalyzer:
             return None
         self.btc_df_cache[cache_key] = btc_df
         return btc_df.copy()
+    
+    def _get_alt_data(self, symbol: str, period: str, timeframe: str, coin: str = None) -> pd.DataFrame | None:
+        """
+        获取山寨币数据（带缓存和智能切片）
+        
+        对于1m/1d和1m/7d，从1m/30d数据中本地切片生成，减少API请求
+        
+        Args:
+            symbol: 交易对名称
+            period: 数据周期
+            timeframe: K线时间周期
+            coin: 用于日志的币种名称（可选）
+        
+        Returns:
+            成功返回DataFrame，失败返回None
+        """
+        display_name = coin or symbol
+        cache_key = (symbol, timeframe, period)
+        
+        # 检查缓存
+        if cache_key in self.alt_df_cache:
+            logger.debug(f"山寨币数据缓存命中 | {display_name} | {timeframe}/{period}")
+            return self.alt_df_cache[cache_key].copy()
+        
+        # 对于1m/1d和1m/7d，尝试从1m/30d数据中切片
+        if timeframe == "1m" and period in ["1d", "7d"]:
+            source_cache_key = (symbol, "1m", "30d")
+            if source_cache_key in self.alt_df_cache:
+                logger.debug(f"山寨币数据从30d切片生成 | {display_name} | {timeframe}/{period}")
+                source_df = self.alt_df_cache[source_cache_key]
+                target_bars = self._period_to_bars(period, timeframe)
+                sliced_df = source_df.tail(target_bars).copy()
+                # 重新计算return列
+                sliced_df['return'] = sliced_df['Close'].pct_change().fillna(0)
+                sliced_df['volume_usd'] = sliced_df['Volume'] * sliced_df['Close']
+                # 缓存切片后的数据
+                self.alt_df_cache[cache_key] = sliced_df
+                return sliced_df
+            else:
+                # 如果没有30d数据，先下载30d数据并缓存
+                logger.debug(f"山寨币数据缓存未命中，下载30d数据用于切片 | {display_name} | {timeframe}/{period}")
+                alt_30d_df = self._safe_download(symbol, "30d", timeframe, coin)
+                if alt_30d_df is None:
+                    return None
+                self.alt_df_cache[source_cache_key] = alt_30d_df
+                # 从30d数据中切片
+                target_bars = self._period_to_bars(period, timeframe)
+                sliced_df = alt_30d_df.tail(target_bars).copy()
+                sliced_df['return'] = sliced_df['Close'].pct_change().fillna(0)
+                sliced_df['volume_usd'] = sliced_df['Volume'] * sliced_df['Close']
+                self.alt_df_cache[cache_key] = sliced_df
+                return sliced_df
+        
+        # 对于其他组合，直接下载并缓存
+        logger.debug(f"山寨币数据缓存未命中，开始下载 | {display_name} | {timeframe}/{period}")
+        alt_df = self._safe_download(symbol, period, timeframe, coin)
+        if alt_df is None:
+            return None
+        self.alt_df_cache[cache_key] = alt_df
+        return alt_df.copy()
     
     @staticmethod
     def _safe_execute(func, *args, error_msg: str = None, log_error: bool = True, **kwargs):
@@ -349,7 +439,7 @@ class DelayCorrelationAnalyzer:
         if btc_df is None:
             return None
         
-        alt_df = self._safe_download(coin, period, timeframe, coin)
+        alt_df = self._get_alt_data(coin, period, timeframe, coin)
         if alt_df is None:
             return None
         
