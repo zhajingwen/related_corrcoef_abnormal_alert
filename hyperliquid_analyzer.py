@@ -205,6 +205,7 @@ class DelayCorrelationAnalyzer:
             time.sleep(1.5)
 
         if not all_rows:
+            logger.debug(f"交易对无历史数据（API返回空列表）| 币种: {symbol} | {timeframe}/{period}")
             return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume", "return", "volume_usd"])
 
         df = pd.DataFrame(all_rows, columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"])
@@ -335,28 +336,49 @@ class DelayCorrelationAnalyzer:
         
         # 检查缓存
         if cache_key in self.alt_df_cache:
-            logger.debug(f"山寨币数据缓存命中 | {display_name} | {timeframe}/{period}")
-            return self.alt_df_cache[cache_key].copy()
+            cached_df = self.alt_df_cache[cache_key]
+            # 验证缓存的数据是否为空
+            if cached_df.empty or len(cached_df) == 0:
+                logger.warning(f"山寨币数据缓存命中但数据为空，跳过 | 币种: {display_name} | {timeframe}/{period}")
+                return None
+            logger.debug(f"山寨币数据缓存命中 | 币种: {display_name} | {timeframe}/{period}")
+            return cached_df.copy()
         
         # 对于1m/1d、1m/7d、5m/1d和5m/7d，尝试从对应timeframe的30d数据中切片
         if timeframe in ["1m", "5m"] and period in ["1d", "7d"]:
             source_cache_key = (symbol, timeframe, "30d")
             if source_cache_key in self.alt_df_cache:
-                logger.debug(f"山寨币数据从30d切片生成 | {display_name} | {timeframe}/{period}")
                 source_df = self.alt_df_cache[source_cache_key]
+                # 检查源数据是否为空
+                if source_df.empty or len(source_df) == 0:
+                    logger.warning(f"山寨币30d源数据为空，无法切片 | 币种: {display_name} | {timeframe}/{period}")
+                    return None
+                logger.debug(f"山寨币数据从30d切片生成 | 币种: {display_name} | {timeframe}/{period}")
                 target_bars = self._period_to_bars(period, timeframe)
                 sliced_df = source_df.tail(target_bars).copy()
                 # 重新计算return列
                 sliced_df['return'] = sliced_df['Close'].pct_change().fillna(0)
                 sliced_df['volume_usd'] = sliced_df['Volume'] * sliced_df['Close']
+                # 验证切片后的数据量
+                if len(sliced_df) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
+                    logger.warning(f"山寨币切片后数据量不足，不缓存 | 币种: {display_name} | {timeframe}/{period} | 数据量: {len(sliced_df)}")
+                    return None
                 # 缓存切片后的数据
                 self.alt_df_cache[cache_key] = sliced_df
                 return sliced_df
             else:
                 # 如果没有30d数据，先下载30d数据并缓存
-                logger.debug(f"山寨币数据首次下载并缓存30d数据，用于后续切片生成1d/7d | {display_name} | {timeframe}/{period}")
+                logger.debug(f"山寨币数据首次下载并缓存30d数据，用于后续切片生成1d/7d | 币种: {display_name} | {timeframe}/{period}")
                 alt_30d_df = self._safe_download(symbol, "30d", timeframe, coin)
                 if alt_30d_df is None:
+                    return None
+                # 验证下载的数据是否为空
+                if alt_30d_df.empty or len(alt_30d_df) == 0:
+                    logger.warning(f"山寨币30d数据不存在（空数据），不缓存 | 币种: {display_name} | {timeframe}/30d")
+                    return None
+                # 验证数据量是否足够
+                if len(alt_30d_df) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
+                    logger.warning(f"山寨币30d数据量不足，不缓存 | 币种: {display_name} | {timeframe}/30d | 数据量: {len(alt_30d_df)}")
                     return None
                 self.alt_df_cache[source_cache_key] = alt_30d_df
                 # 从30d数据中切片
@@ -364,13 +386,25 @@ class DelayCorrelationAnalyzer:
                 sliced_df = alt_30d_df.tail(target_bars).copy()
                 sliced_df['return'] = sliced_df['Close'].pct_change().fillna(0)
                 sliced_df['volume_usd'] = sliced_df['Volume'] * sliced_df['Close']
+                # 验证切片后的数据量
+                if len(sliced_df) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
+                    logger.warning(f"山寨币切片后数据量不足，不缓存 | 币种: {display_name} | {timeframe}/{period} | 数据量: {len(sliced_df)}")
+                    return None
                 self.alt_df_cache[cache_key] = sliced_df
                 return sliced_df
         
         # 对于其他组合，直接下载并缓存
-        logger.debug(f"山寨币数据缓存未命中，开始下载 | {display_name} | {timeframe}/{period}")
+        logger.debug(f"山寨币数据缓存未命中，开始下载 | 币种: {display_name} | {timeframe}/{period}")
         alt_df = self._safe_download(symbol, period, timeframe, coin)
         if alt_df is None:
+            return None
+        # 验证下载的数据是否为空
+        if alt_df.empty or len(alt_df) == 0:
+            logger.warning(f"山寨币数据不存在（空数据），不缓存 | 币种: {display_name} | {timeframe}/{period}")
+            return None
+        # 验证数据量是否足够
+        if len(alt_df) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
+            logger.warning(f"山寨币数据量不足，不缓存 | 币种: {display_name} | {timeframe}/{period} | 数据量: {len(alt_df)}")
             return None
         self.alt_df_cache[cache_key] = alt_df
         return alt_df.copy()
@@ -412,12 +446,17 @@ class DelayCorrelationAnalyzer:
         Returns:
             成功返回对齐后的 (btc_df, alt_df)，失败返回 None
         """
+        # 检查数据是否存在（区分"数据不存在"和"数据量不足"）
+        if alt_df.empty or len(alt_df) == 0:
+            logger.warning(f"数据不存在（空数据），跳过 | 币种: {coin} | {timeframe}/{period}")
+            return None
+        
         # 对齐时间索引
         common_idx = btc_df.index.intersection(alt_df.index)
         btc_df_aligned = btc_df.loc[common_idx]
         alt_df_aligned = alt_df.loc[common_idx]
         
-        # 数据验证：检查数据量
+        # 数据验证：检查数据量（数据存在但不足）
         if len(btc_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS or len(alt_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
             logger.warning(f"数据量不足，跳过 | 币种: {coin} | {timeframe}/{period} | BTC数据量: {len(btc_df_aligned)} | 山寨币数据量: {len(alt_df_aligned)}")
             logger.debug(f"币种: {coin} | {timeframe}/{period} 数据详情 | BTC: {btc_df.head()}, length: {len(btc_df)} | 山寨币: {alt_df.head()}, length: {len(alt_df)}")
@@ -520,14 +559,26 @@ class DelayCorrelationAnalyzer:
             是否发现异常模式
         """
         results = []
+        first_combination_checked = False
         
         for timeframe in self.timeframes:
             for period in self.periods:
+                # 对于第一个组合，先检查数据是否存在
+                if not first_combination_checked:
+                    first_combination_checked = True
+                    # 尝试获取第一个组合的数据，检查是否为空
+                    alt_df = self._get_alt_data(coin, period, timeframe, coin)
+                    if alt_df is None:
+                        # 数据不存在，提前退出所有组合
+                        logger.warning(f"币种数据不存在（第一个组合检查无数据），跳过后续所有组合 | 币种: {coin} | {timeframe}/{period}")
+                        return False
+                
                 result = self._safe_execute(
                     self._analyze_single_combination,
                     coin, timeframe, period,
                     error_msg=f"处理 {coin} 的 {timeframe}/{period} 时发生异常"
                 )
+                
                 if result is not None:
                     results.append(result)
         
