@@ -59,18 +59,31 @@ logger = setup_logging()
 class DelayCorrelationAnalyzer:
     """
     山寨币与BTC相关系数分析器
-    
+
     识别短期低相关但长期高相关的异常币种，这类币种存在时间差套利机会。
     """
     # 相关系数计算所需的最小数据点数
     MIN_POINTS_FOR_CORR_CALC = 10
     # 数据分析所需的最小数据点数
     MIN_DATA_POINTS_FOR_ANALYSIS = 50
-    
+
     # 异常模式检测阈值
     LONG_TERM_CORR_THRESHOLD = 0.6  # 长期相关系数阈值
     SHORT_TERM_CORR_THRESHOLD = 0.3  # 短期相关系数阈值
     CORR_DIFF_THRESHOLD = 0.5  # 相关系数差值阈值
+
+    # ========== 新增：异常值处理配置 ==========
+    # Winsorization 分位数配置
+    WINSORIZE_LOWER_PERCENTILE = 1   # 下分位数（1%）
+    WINSORIZE_UPPER_PERCENTILE = 99  # 上分位数（91%）
+    # 是否启用异常值处理（可配置开关）
+    ENABLE_OUTLIER_TREATMENT = True
+
+    # ========== 新增：Beta 系数配置 ==========
+    # 是否计算 Beta 系数（默认启用）
+    ENABLE_BETA_CALCULATION = True
+    # Beta 系数的最小数据点要求（与相关系数相同）
+    MIN_POINTS_FOR_BETA_CALC = 10
     
     def __init__(self, exchange_name="kucoin", timeout=30000, default_combinations=None):
         """
@@ -216,48 +229,192 @@ class DelayCorrelationAnalyzer:
         return df
     
     @staticmethod
-    def find_optimal_delay(btc_ret, alt_ret, max_lag=3):
+    def _winsorize_returns(returns, lower_p=None, upper_p=None, log_stats=True):
         """
-        寻找最优延迟 τ*
-        
+        Winsorization 异常值处理
+
+        将收益率数组中的极端值限制在指定分位数范围内，提高统计分析的稳健性。
+
+        Args:
+            returns: 收益率数组（numpy array）
+            lower_p: 下分位数（默认使用类常量 WINSORIZE_LOWER_PERCENTILE）
+            upper_p: 上分位数（默认使用类常量 WINSORIZE_UPPER_PERCENTILE）
+            log_stats: 是否记录统计信息到日志（默认 False）
+
+        Returns:
+            处理后的收益率数组（numpy array）
+
+        Note:
+            - 如果数据点少于 20 个，不进行异常值处理（返回原数组）
+            - 使用 np.clip 进行快速处理
+            - 异常值会被限制在分位数边界内，而不是删除
+        """
+        # 1. 参数默认值处理
+        if lower_p is None:
+            lower_p = DelayCorrelationAnalyzer.WINSORIZE_LOWER_PERCENTILE
+        if upper_p is None:
+            upper_p = DelayCorrelationAnalyzer.WINSORIZE_UPPER_PERCENTILE
+
+        # 2. 数据量检查：如果数据点太少，不进行异常值处理
+        if len(returns) < 20:
+            return returns
+
+        # 3. 计算分位数边界
+        lower_bound = np.percentile(returns, lower_p)
+        upper_bound = np.percentile(returns, upper_p)
+
+        # 4. 统计异常值数量（用于日志和调试）
+        n_lower_outliers = np.sum(returns < lower_bound)
+        n_upper_outliers = np.sum(returns > upper_bound)
+        total_outliers = n_lower_outliers + n_upper_outliers
+
+        # 6. Winsorization：将极端值限制在分位数范围内
+        winsorized = np.clip(returns, lower_bound, upper_bound)
+
+        # 6. 记录统计信息（如果启用）
+        if log_stats and total_outliers > 0:
+            logger.info(
+                f"异常值处理统计 | "
+                f"下侧异常值数量: {n_lower_outliers} | "
+                f"上侧异常值数量: {n_upper_outliers} | "
+                f"分位数范围: [{lower_bound:.6f}, {upper_bound:.6f}] | "
+                f"原始数据范围: [{np.min(returns):.6f}, {np.max(returns):.6f}] | "
+                f"处理后数据范围: [{np.min(winsorized):.6f}, {np.max(winsorized):.6f}]"
+            )
+
+        return winsorized
+
+    @staticmethod
+    def _calculate_beta(btc_ret, alt_ret):
+        """
+        计算 Beta 系数
+
+        衡量山寨币收益率相对于 BTC 收益率的跟随幅度。
+
+        Args:
+            btc_ret: BTC 收益率数组（numpy array）
+            alt_ret: 山寨币收益率数组（numpy array）
+
+        Returns:
+            float: Beta 系数值
+                - Beta > 1.0: ALT 波动幅度大于 BTC
+                - Beta = 1.0: ALT 与 BTC 同步波动
+                - Beta < 1.0: ALT 波动幅度小于 BTC
+                - Beta < 0: ALT 与 BTC 反向波动（罕见）
+                - 如果数据不足或计算失败，返回 np.nan
+
+        Note:
+            - Beta 系数需要至少 MIN_POINTS_FOR_BETA_CALC 个数据点
+            - 如果 BTC 收益率方差为 0，返回 np.nan
+        """
+        # 1. 数据长度检查
+        if len(btc_ret) != len(alt_ret):
+            logger.warning(f"Beta 计算失败：BTC 和 ALT 数据长度不一致 | "
+                          f"BTC: {len(btc_ret)}, ALT: {len(alt_ret)}")
+            return np.nan
+
+        # 2. 最小数据点检查
+        if len(btc_ret) < DelayCorrelationAnalyzer.MIN_POINTS_FOR_BETA_CALC:
+            return np.nan
+
+        # 3. 计算协方差和方差
+        try:
+            # 使用 numpy 的 cov 函数计算协方差矩阵
+            # cov_matrix[0, 1] 是 BTC 和 ALT 的协方差
+            # cov_matrix[0, 0] 是 BTC 的方差
+            cov_matrix = np.cov(btc_ret, alt_ret)
+            covariance = cov_matrix[0, 1]
+            btc_variance = cov_matrix[0, 0]
+
+            # 4. 检查 BTC 方差是否为 0（避免除以 0）
+            if btc_variance == 0 or np.isnan(btc_variance):
+                logger.debug("Beta 计算失败：BTC 收益率方差为 0 或 NaN")
+                return np.nan
+
+            # 5. 计算 Beta 系数
+            beta = covariance / btc_variance
+
+            # 6. 检查结果有效性
+            if np.isnan(beta) or np.isinf(beta):
+                logger.debug(f"Beta 计算失败：结果为 NaN 或 Inf | Beta: {beta}")
+                return np.nan
+
+            return beta
+
+        except Exception as e:
+            logger.warning(f"Beta 计算异常：{type(e).__name__}: {str(e)}")
+            return np.nan
+
+    @staticmethod
+    def find_optimal_delay(btc_ret, alt_ret, max_lag=3,
+                           enable_outlier_treatment=None,
+                           enable_beta_calc=None):
+        """
+        寻找最优延迟 τ*（增强版：支持异常值处理和 Beta 系数计算）
+
         通过计算不同延迟下BTC和山寨币收益率的相关系数，找出使相关系数最大的延迟值。
         tau_star > 0 表示山寨币滞后于BTC，存在时间差套利机会。
-        
+
         Args:
             btc_ret: BTC收益率数组
             alt_ret: 山寨币收益率数组
-            max_lag: 最大延迟值
-        
+            max_lag: 最大延迟值（默认 3）
+            enable_outlier_treatment: 是否启用异常值处理（None 时使用类常量）
+            enable_beta_calc: 是否计算 Beta 系数（None 时使用类常量）
+
         Returns:
-            (tau_star, corrs, max_related_matrix): 最优延迟、相关系数列表、最大相关系数
+            tuple: (tau_star, corrs, max_related_matrix, beta)
+                - tau_star: 最优延迟值
+                - corrs: 所有延迟值对应的相关系数列表
+                - max_related_matrix: 最大相关系数
+                - beta: Beta 系数（如果启用）或 None
         """
+        # ========== 1. 参数默认值处理 ==========
+        if enable_outlier_treatment is None:
+            enable_outlier_treatment = DelayCorrelationAnalyzer.ENABLE_OUTLIER_TREATMENT
+        if enable_beta_calc is None:
+            enable_beta_calc = DelayCorrelationAnalyzer.ENABLE_BETA_CALCULATION
+
+        # ========== 2. 异常值处理（如果启用）==========
+        if enable_outlier_treatment:
+            btc_ret_processed = DelayCorrelationAnalyzer._winsorize_returns(
+                btc_ret, log_stats=True
+            )
+            alt_ret_processed = DelayCorrelationAnalyzer._winsorize_returns(
+                alt_ret, log_stats=True
+            )
+        else:
+            btc_ret_processed = btc_ret
+            alt_ret_processed = alt_ret
+
+        # ========== 3. 原有逻辑：计算相关系数和最优延迟 ==========
         corrs = []
         lags = list(range(0, max_lag + 1))
-        arr_len = len(btc_ret)
-        
+        arr_len = len(btc_ret_processed)
+
         for lag in lags:
             # 检查 lag 是否超过数组长度，避免空数组切片
             if lag > 0 and lag >= arr_len:
                 corrs.append(np.nan)
                 continue
-            
+
             if lag > 0:
                 # ALT滞后BTC: 比较 BTC[t] 与 ALT[t+lag]
-                x = btc_ret[:-lag]
-                y = alt_ret[lag:]
+                x = btc_ret_processed[:-lag]
+                y = alt_ret_processed[lag:]
             else:
-                x = btc_ret
-                y = alt_ret
-            
+                x = btc_ret_processed
+                y = alt_ret_processed
+
             m = min(len(x), len(y))
-            
+
             if m < DelayCorrelationAnalyzer.MIN_POINTS_FOR_CORR_CALC:
                 corrs.append(np.nan)
                 continue
-            
+
             related_matrix = np.corrcoef(x[:m], y[:m])[0, 1]
             corrs.append(np.nan if np.isnan(related_matrix) else related_matrix)
-        
+
         # 找出最大相关系数对应的延迟值（匹配性最好的延迟窗口长度）
         valid_corrs = np.array(corrs)
         valid_mask = ~np.isnan(valid_corrs)
@@ -269,8 +426,20 @@ class DelayCorrelationAnalyzer:
         else:
             tau_star = 0
             max_related_matrix = np.nan
-        
-        return tau_star, corrs, max_related_matrix
+
+        # ========== 4. 计算 Beta 系数（如果启用）==========
+        beta = None
+        if enable_beta_calc:
+            # 关键修正：使用 lag=0 的原始处理数据计算 Beta（同期波动关系）
+            # Beta 系数表示同时刻的波动幅度，不应使用延迟对齐后的数据
+            m_beta = min(len(btc_ret_processed), len(alt_ret_processed))
+            if m_beta >= DelayCorrelationAnalyzer.MIN_POINTS_FOR_BETA_CALC:
+                beta = DelayCorrelationAnalyzer._calculate_beta(
+                    btc_ret_processed[:m_beta],
+                    alt_ret_processed[:m_beta]
+                )
+
+        return tau_star, corrs, max_related_matrix, beta
     
     def _get_btc_data(self, timeframe: str, period: str) -> pd.DataFrame | None:
         """获取BTC数据（带缓存）"""
@@ -385,40 +554,53 @@ class DelayCorrelationAnalyzer:
     
     def _analyze_single_combination(self, coin: str, timeframe: str, period: str, alt_df: pd.DataFrame | None = None) -> tuple | None:
         """
-        分析单个 timeframe/period 组合
-        
+        分析单个 timeframe/period 组合（增强版：支持 Beta 系数）
+
         Args:
             coin: 币种交易对名称
             timeframe: K线时间周期
             period: 数据周期
             alt_df: 可选的预获取的山寨币数据，如果提供则直接使用，否则调用 _get_alt_data 获取
-        
+
         Returns:
-            成功返回 (correlation, timeframe, period, tau_star)，失败返回 None
+            成功返回 (correlation, timeframe, period, tau_star, beta)，失败返回 None
+            注意：beta 可能为 None（如果计算失败或禁用）
         """
         btc_df = self._get_btc_data(timeframe, period)
         if btc_df is None:
             return None
-        
+
         # 如果提供了预获取的数据，直接使用；否则调用 _get_alt_data 获取
         if alt_df is None:
             alt_df = self._get_alt_data(coin, period, timeframe, coin)
         if alt_df is None:
             return None
-        
+
         # 对齐和验证数据
         aligned_data = self._align_and_validate_data(btc_df, alt_df, coin, timeframe, period)
         if aligned_data is None:
             return None
         btc_df_aligned, alt_df_aligned = aligned_data
-        
-        tau_star, _, related_matrix = self.find_optimal_delay(
-            btc_df_aligned['return'].values, 
+
+        # 调用增强版的 find_optimal_delay（现在返回 4 个值）
+        tau_star, _, related_matrix, beta = self.find_optimal_delay(
+            btc_df_aligned['return'].values,
             alt_df_aligned['return'].values
         )
-        logger.debug(f"分析中间结果 | 币种: {coin} | timeframe: {timeframe} | period: {period} | tau_star: {tau_star} | 相关系数: {related_matrix:.4f}")
-        
-        return (related_matrix, timeframe, period, tau_star)
+
+        # 增强日志输出
+        if beta is not None and not np.isnan(beta):
+            logger.debug(
+                f"分析中间结果 | 币种: {coin} | timeframe: {timeframe} | period: {period} | "
+                f"tau_star: {tau_star} | 相关系数: {related_matrix:.4f} | Beta: {beta:.4f}"
+            )
+        else:
+            logger.debug(
+                f"分析中间结果 | 币种: {coin} | timeframe: {timeframe} | period: {period} | "
+                f"tau_star: {tau_star} | 相关系数: {related_matrix:.4f}"
+            )
+
+        return (related_matrix, timeframe, period, tau_star, beta)
     
     def _detect_anomaly_pattern(self, results: list) -> tuple[bool, float]:
         """
@@ -457,19 +639,53 @@ class DelayCorrelationAnalyzer:
         return is_anomaly, diff_amount, min_short_corr, max_long_corr
     
     def _output_results(self, coin: str, results: list, diff_amount: float):
-        """输出异常模式的分析结果"""
-        df_results = pd.DataFrame([
-            {'相关系数': corr, '时间周期': tf, '数据周期': p, '最优延迟': ts}
-            for corr, tf, p, ts in results
-        ])
-        
+        """输出异常模式的分析结果（增强版：包含 Beta 系数）"""
+        # 构建结果 DataFrame
+        data_rows = []
+        has_beta = False  # 标记是否有有效的Beta值
+
+        for result in results:
+            # 处理新旧格式兼容（5个值 vs 4个值）
+            if len(result) == 5:
+                corr, tf, p, ts, beta = result
+            else:
+                corr, tf, p, ts = result
+                beta = None
+
+            row = {
+                '相关系数': corr,
+                '时间周期': tf,
+                '数据周期': p,
+                '最优延迟': ts
+            }
+
+            # 添加 Beta 系数列（如果存在且有效）
+            if beta is not None and not np.isnan(beta):
+                row['Beta系数'] = beta
+                has_beta = True
+
+            data_rows.append(row)
+
+        df_results = pd.DataFrame(data_rows)
+
         logger.info(f"发现异常币种 | 交易所: {self.exchange_name} | 币种: {coin} | 差值: {diff_amount:.2f}")
-        
+
         # 飞书消息内容
         content = f"{self.exchange_name}\n\n{coin} 相关系数分析结果\n{df_results.to_string(index=False)}\n"
         content += f"\n差值: {diff_amount:.2f}"
+
+        # 如果有Beta信息，添加风险提示
+        if has_beta:
+            avg_beta = df_results['Beta系数'].mean() if 'Beta系数' in df_results.columns else None
+            if avg_beta is not None and avg_beta > 1.5:
+                content += f"\n⚠️ 高波动风险：平均Beta={avg_beta:.2f}（波动幅度是BTC的{avg_beta:.1f}倍）"
+            elif avg_beta is not None and avg_beta > 1.2:
+                content += f"\n⚠️ 中等波动：平均Beta={avg_beta:.2f}"
+            else:
+                content += f"\nBeta系数: {avg_beta:.2f}"
+
         logger.debug(f"详细分析结果:\n{df_results.to_string(index=False)}")
-        
+
         # 只有在 lark_hook 有效时才发送飞书通知
         if self.lark_hook:
             sender(content, self.lark_hook)
@@ -479,16 +695,16 @@ class DelayCorrelationAnalyzer:
     def one_coin_analysis(self, coin: str) -> bool:
         """
         分析单个币种与BTC的相关系数，识别异常模式
-        
+
         Args:
             coin: 币种交易对名称，如 "ETH/USDC:USDC"
-        
+
         Returns:
             是否发现异常模式
         """
         results = []
         first_alt_df = None  # 保存第一个组合获取的数据，避免重复调用
-        
+
         # 直接遍历预定义的组合列表：5m/7d 和 1m/1d
         for timeframe, period in self.combinations:
             # 尝试获取第一个组合的数据，检查是否为空
@@ -505,20 +721,32 @@ class DelayCorrelationAnalyzer:
             )
             if result is not None:
                 results.append(result)
-        
-        # 过滤 NaN 并按相关系数降序排序
-        valid_results = [(corr, tf, p, ts) for corr, tf, p, ts in results if not np.isnan(corr)]
+
+        # 过滤 NaN 并按相关系数降序排序（处理新的5元组格式）
+        valid_results = []
+        for result in results:
+            # 处理新格式（5个值）
+            if len(result) == 5:
+                corr, tf, p, ts, beta = result
+                if not np.isnan(corr):
+                    valid_results.append((corr, tf, p, ts, beta))
+            # 向后兼容旧格式（4个值）
+            elif len(result) == 4:
+                corr, tf, p, ts = result
+                if not np.isnan(corr):
+                    valid_results.append((corr, tf, p, ts, None))
+
         valid_results = sorted(valid_results, key=lambda x: x[0], reverse=True)
-        
+
         if not valid_results:
             logger.warning(f"数据不足，无法分析 | 币种: {coin}")
             return False
-        
+
         is_anomaly, diff_amount, min_short_corr, max_long_corr = self._detect_anomaly_pattern(valid_results)
         logger.info(
             f"相关系数检测 | 币种: {coin} | 是否异常: {is_anomaly} | 差值: {diff_amount:.4f} | 短期最小: {min_short_corr:.4f} | 长期最大: {max_long_corr:.4f}"
             )
-        
+
         if is_anomaly:
             self._output_results(coin, valid_results, diff_amount)
             return True
