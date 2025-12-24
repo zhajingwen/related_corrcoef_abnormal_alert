@@ -12,7 +12,7 @@ from utils.lark_bot import sender
 from utils.config import lark_bot_id
 
 
-def setup_logging(log_file="hyperliquid.log", level=logging.DEBUG):
+def setup_logging(log_file="hyperliquid.log", level=logging.INFO):
     """
     配置日志系统，支持控制台和文件输出
     
@@ -416,7 +416,7 @@ class DelayCorrelationAnalyzer:
             btc_df_aligned['return'].values, 
             alt_df_aligned['return'].values
         )
-        logger.debug(f"分析结果 | timeframe: {timeframe} | period: {period} | tau_star: {tau_star} | 相关系数: {related_matrix:.4f}")
+        logger.debug(f"分析中间结果 | 币种: {coin} | timeframe: {timeframe} | period: {period} | tau_star: {tau_star} | 相关系数: {related_matrix:.4f}")
         
         return (related_matrix, timeframe, period, tau_star)
     
@@ -430,10 +430,12 @@ class DelayCorrelationAnalyzer:
         - 差值 > CORR_DIFF_THRESHOLD：短期和长期差异足够显著
         
         Returns:
-            (is_anomaly, diff_amount): 是否异常模式、相关系数差值
+            (is_anomaly, diff_amount, min_short_corr, max_long_corr): 是否异常模式、相关系数差值、短期最小相关系数、长期最大相关系数
         """
         short_periods = ['1d']
         long_periods = ['7d']
+        diff_amount = 0
+        is_anomaly = False
         
         short_term_corrs = [x[0] for x in results if x[2] in short_periods]
         long_term_corrs = [x[0] for x in results if x[2] in long_periods]
@@ -443,17 +445,16 @@ class DelayCorrelationAnalyzer:
         
         min_short_corr = min(short_term_corrs)
         max_long_corr = max(long_term_corrs)
-        logger.debug(f"相关系数检测 | 短期最小: {min_short_corr:.4f} | 长期最大: {max_long_corr:.4f}")
         
         if max_long_corr > self.LONG_TERM_CORR_THRESHOLD and min_short_corr < self.SHORT_TERM_CORR_THRESHOLD:
             diff_amount = max_long_corr - min_short_corr
             if diff_amount > self.CORR_DIFF_THRESHOLD:
-                return True, diff_amount
+                is_anomaly = True
             # 短期存在明显滞后时也触发
             if any(tau_star > 0 for _, _, period, tau_star in results if period == '1d'):
-                return True, diff_amount
+                is_anomaly = True
         
-        return False, 0
+        return is_anomaly, diff_amount, min_short_corr, max_long_corr
     
     def _output_results(self, coin: str, results: list, diff_amount: float):
         """输出异常模式的分析结果"""
@@ -486,34 +487,22 @@ class DelayCorrelationAnalyzer:
             是否发现异常模式
         """
         results = []
-        first_combination_checked = False
         first_alt_df = None  # 保存第一个组合获取的数据，避免重复调用
         
         # 直接遍历预定义的组合列表：5m/7d 和 1m/1d
         for timeframe, period in self.combinations:
-            # 对于第一个组合，先检查数据是否存在
-            if not first_combination_checked:
-                first_combination_checked = True
-                # 尝试获取第一个组合的数据，检查是否为空
-                first_alt_df = self._get_alt_data(coin, period, timeframe, coin)
-                if first_alt_df is None:
-                    # 数据不存在，提前退出所有组合
-                    logger.warning(f"币种数据不存在（第一个组合检查无数据），跳过后续所有组合 | 币种: {coin} | {timeframe}/{period}")
-                    return False
-                # 使用预获取的数据进行分析，避免重复调用
-                result = self._safe_execute(
-                    self._analyze_single_combination,
-                    coin, timeframe, period, first_alt_df,
-                    error_msg=f"处理 {coin} 的 {timeframe}/{period} 时发生异常"
-                )
-            else:
-                # 后续组合正常调用，不传入预获取数据
-                result = self._safe_execute(
-                    self._analyze_single_combination,
-                    coin, timeframe, period,
-                    error_msg=f"处理 {coin} 的 {timeframe}/{period} 时发生异常"
-                )
-            
+            # 尝试获取第一个组合的数据，检查是否为空
+            first_alt_df = self._get_alt_data(coin, period, timeframe, coin)
+            if first_alt_df is None:
+                # 数据不存在，提前退出所有组合
+                logger.warning(f"币种数据不存在（第一个组合检查无数据），跳过后续所有组合 | 币种: {coin} | {timeframe}/{period}")
+                return False
+            # 使用预获取的数据进行分析，避免重复调用
+            result = self._safe_execute(
+                self._analyze_single_combination,
+                coin, timeframe, period, first_alt_df,
+                error_msg=f"处理 {coin} 的 {timeframe}/{period} 时发生异常"
+            )
             if result is not None:
                 results.append(result)
         
@@ -525,7 +514,10 @@ class DelayCorrelationAnalyzer:
             logger.warning(f"数据不足，无法分析 | 币种: {coin}")
             return False
         
-        is_anomaly, diff_amount = self._detect_anomaly_pattern(valid_results)
+        is_anomaly, diff_amount, min_short_corr, max_long_corr = self._detect_anomaly_pattern(valid_results)
+        logger.info(
+            f"相关系数检测 | 币种: {coin} | 是否异常: {is_anomaly} | 差值: {diff_amount:.4f} | 短期最小: {min_short_corr:.4f} | 长期最大: {max_long_corr:.4f}"
+            )
         
         if is_anomaly:
             self._output_results(coin, valid_results, diff_amount)
@@ -535,7 +527,7 @@ class DelayCorrelationAnalyzer:
             corrs = [r[0] for r in valid_results]
             min_corr = min(corrs) if corrs else 0
             max_corr = max(corrs) if corrs else 0
-            logger.debug(f"常规数据 | 币种: {coin} | 相关系数范围: {min_corr:.4f} ~ {max_corr:.4f}")
+            logger.info(f"常规数据 | 币种: {coin} | 相关系数范围: {min_corr:.4f} ~ {max_corr:.4f}")
             return False
     
     def run(self):
