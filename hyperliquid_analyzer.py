@@ -295,7 +295,7 @@ class DelayCorrelationAnalyzer:
                 return sliced_df
             else:
                 # 如果没有30d数据，先下载30d数据并缓存
-                logger.debug(f"BTC数据缓存未命中，下载30d数据用于切片 | {timeframe}/{period}")
+                logger.debug(f"BTC数据首次下载并缓存30d数据，用于后续切片生成1d/7d | {timeframe}/{period}")
                 btc_30d_df = self._safe_download(self.btc_symbol, "30d", timeframe)
                 if btc_30d_df is None:
                     return None
@@ -354,7 +354,7 @@ class DelayCorrelationAnalyzer:
                 return sliced_df
             else:
                 # 如果没有30d数据，先下载30d数据并缓存
-                logger.debug(f"山寨币数据缓存未命中，下载30d数据用于切片 | {display_name} | {timeframe}/{period}")
+                logger.debug(f"山寨币数据首次下载并缓存30d数据，用于后续切片生成1d/7d | {display_name} | {timeframe}/{period}")
                 alt_30d_df = self._safe_download(symbol, "30d", timeframe, coin)
                 if alt_30d_df is None:
                     return None
@@ -419,9 +419,8 @@ class DelayCorrelationAnalyzer:
         
         # 数据验证：检查数据量
         if len(btc_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS or len(alt_df_aligned) < self.MIN_DATA_POINTS_FOR_ANALYSIS:
-            logger.warning(f"数据量不足，跳过 | 币种: {coin} | {timeframe}/{period}")
-            logger.info(f"币种: {coin} | {timeframe}/{period} btc_df: {btc_df.head()}, length: {len(btc_df)}")
-            logger.info(f"币种: {coin} | {timeframe}/{period} alt_df: {alt_df.head()}, length: {len(alt_df)}")
+            logger.warning(f"数据量不足，跳过 | 币种: {coin} | {timeframe}/{period} | BTC数据量: {len(btc_df_aligned)} | 山寨币数据量: {len(alt_df_aligned)}")
+            logger.debug(f"数据详情 | BTC: {btc_df.head()}, length: {len(btc_df)} | 山寨币: {alt_df.head()}, length: {len(alt_df)}")
             return None
         
         return btc_df_aligned, alt_df_aligned
