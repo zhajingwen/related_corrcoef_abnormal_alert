@@ -645,11 +645,15 @@ class DelayCorrelationAnalyzer:
         min_short_corr = min(short_term_corrs)
         max_long_corr = max(long_term_corrs)
         
+        # 长期相关系数大于阈值，且短期相关系数小于阈值的时候，才计算差值
         if max_long_corr > self.LONG_TERM_CORR_THRESHOLD and min_short_corr < self.SHORT_TERM_CORR_THRESHOLD:
+            # 相关性差值大于阈值，则认为存在套利机会
             diff_amount = max_long_corr - min_short_corr
             if diff_amount > self.CORR_DIFF_THRESHOLD:
                 is_anomaly = True
-            # 短期存在明显滞后时也触发（修复：使用索引访问，兼容5元组和4元组格式）
+        # 长期相关系数大于阈值，且短期存在明显滞后时，则认为存在套利机会
+        if max_long_corr > self.LONG_TERM_CORR_THRESHOLD:
+            # x[3] 是最优延迟，x[2] 是数据周期
             if any((x[3] > 0) for x in results if len(x) >= 4 and x[2] == '1d'):
                 is_anomaly = True
         
