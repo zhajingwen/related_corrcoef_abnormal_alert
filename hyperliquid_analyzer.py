@@ -78,8 +78,8 @@ class DelayCorrelationAnalyzer:
 
     # ========== 新增：异常值处理配置 ==========
     # Winsorization 分位数配置
-    WINSORIZE_LOWER_PERCENTILE = 0.1   # 下分位数（0.3%）
-    WINSORIZE_UPPER_PERCENTILE = 99.9  # 上分位数（99.7%）
+    WINSORIZE_LOWER_PERCENTILE = 0.1   # 下分位数（0.1%）
+    WINSORIZE_UPPER_PERCENTILE = 99.9  # 上分位数（99.9%）
     # 是否启用异常值处理（可配置开关）
     ENABLE_OUTLIER_TREATMENT = True
 
