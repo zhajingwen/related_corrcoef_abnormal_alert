@@ -602,7 +602,7 @@ class DelayCorrelationAnalyzer:
 
         return (related_matrix, timeframe, period, tau_star, beta)
     
-    def _detect_anomaly_pattern(self, results: list) -> tuple[bool, float]:
+    def _detect_anomaly_pattern(self, results: list) -> tuple[bool, float, float, float]:
         """
         检测异常模式：短期低相关但长期高相关
         
@@ -632,8 +632,8 @@ class DelayCorrelationAnalyzer:
             diff_amount = max_long_corr - min_short_corr
             if diff_amount > self.CORR_DIFF_THRESHOLD:
                 is_anomaly = True
-            # 短期存在明显滞后时也触发
-            if any(tau_star > 0 for _, _, period, tau_star in results if period == '1d'):
+            # 短期存在明显滞后时也触发（修复：使用索引访问，兼容5元组和4元组格式）
+            if any((x[3] > 0) for x in results if len(x) >= 4 and x[2] == '1d'):
                 is_anomaly = True
         
         return is_anomaly, diff_amount, min_short_corr, max_long_corr
