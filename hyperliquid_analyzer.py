@@ -68,9 +68,13 @@ class DelayCorrelationAnalyzer:
     MIN_DATA_POINTS_FOR_ANALYSIS = 50
 
     # 异常模式检测阈值
-    LONG_TERM_CORR_THRESHOLD = 0.6  # 长期相关系数阈值
-    SHORT_TERM_CORR_THRESHOLD = 0.4  # 短期相关系数阈值
-    CORR_DIFF_THRESHOLD = 0.3  # 相关系数差值阈值
+    # 长期相关系数阈值，目标需要在下面这两个值的范围内，否则不告警
+    LONG_TERM_CORR_THRESHOLD = 0.6
+    # 短期相关系数阈值，
+    SHORT_TERM_CORR_THRESHOLD = 0.4  
+
+    # 相关系数差值阈值，如果小于这个值就不告警
+    CORR_DIFF_THRESHOLD = 0.38
 
     # ========== 新增：异常值处理配置 ==========
     # Winsorization 分位数配置
@@ -84,6 +88,8 @@ class DelayCorrelationAnalyzer:
     ENABLE_BETA_CALCULATION = True
     # Beta 系数的最小数据点要求（与相关系数相同）
     MIN_POINTS_FOR_BETA_CALC = 10
+    # 平均Beta系数阈值，如果小于这个值就不告警
+    AVG_BETA_THRESHOLD = 1
     
     def __init__(self, exchange_name="kucoin", timeout=30000, default_combinations=None):
         """
@@ -698,6 +704,9 @@ class DelayCorrelationAnalyzer:
                 content += f"\n⚠️ 中等波动：平均Beta={avg_beta:.2f}"
             else:
                 content += f"\nBeta系数: {avg_beta:.2f}"
+            if avg_beta < DelayCorrelationAnalyzer.AVG_BETA_THRESHOLD:
+                logger.info(f"Beta系数小于1，不发送飞书通知 | 币种: {coin} | 平均Beta: {avg_beta:.2f}")
+                return
 
         logger.debug(f"详细分析结果:\n{df_results.to_string(index=False)}")
 
