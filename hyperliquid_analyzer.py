@@ -430,13 +430,23 @@ class DelayCorrelationAnalyzer:
         # ========== 4. 计算 Beta 系数（如果启用）==========
         beta = None
         if enable_beta_calc:
-            # 关键修正：使用 lag=0 的原始处理数据计算 Beta（同期波动关系）
-            # Beta 系数表示同时刻的波动幅度，不应使用延迟对齐后的数据
-            m_beta = min(len(btc_ret_processed), len(alt_ret_processed))
+            # 根据最优延迟选择数据对齐方式计算 Beta
+            # 如果最优延迟 > 0，使用延迟对齐后的数据，以反映真实的跟随关系
+            # 如果最优延迟 = 0，使用同期数据
+            if tau_star > 0:
+                # 使用最优延迟对齐后的数据：BTC[t] 与 ALT[t+tau_star]
+                btc_beta = btc_ret_processed[:-tau_star]
+                alt_beta = alt_ret_processed[tau_star:]
+            else:
+                # 使用同期数据：BTC[t] 与 ALT[t]
+                btc_beta = btc_ret_processed
+                alt_beta = alt_ret_processed
+            
+            m_beta = min(len(btc_beta), len(alt_beta))
             if m_beta >= DelayCorrelationAnalyzer.MIN_POINTS_FOR_BETA_CALC:
                 beta = DelayCorrelationAnalyzer._calculate_beta(
-                    btc_ret_processed[:m_beta],
-                    alt_ret_processed[:m_beta]
+                    btc_beta[:m_beta],
+                    alt_beta[:m_beta]
                 )
 
         return tau_star, corrs, max_related_matrix, beta
@@ -619,8 +629,9 @@ class DelayCorrelationAnalyzer:
         diff_amount = 0
         is_anomaly = False
         
-        short_term_corrs = [x[0] for x in results if x[2] in short_periods]
-        long_term_corrs = [x[0] for x in results if x[2] in long_periods]
+        # 使用索引访问，添加长度检查以确保安全（兼容4元组和5元组格式）
+        short_term_corrs = [x[0] for x in results if len(x) >= 3 and x[2] in short_periods]
+        long_term_corrs = [x[0] for x in results if len(x) >= 3 and x[2] in long_periods]
         
         if not short_term_corrs or not long_term_corrs:
             return False, 0, 0.0, 0.0
@@ -648,9 +659,13 @@ class DelayCorrelationAnalyzer:
             # 处理新旧格式兼容（5个值 vs 4个值）
             if len(result) == 5:
                 corr, tf, p, ts, beta = result
-            else:
+            elif len(result) == 4:
                 corr, tf, p, ts = result
                 beta = None
+            else:
+                # 处理异常格式，记录日志并跳过
+                logger.warning(f"结果格式异常，跳过 | 币种: {coin} | 结果长度: {len(result)} | 结果: {result}")
+                continue
 
             row = {
                 '相关系数': corr,
@@ -735,6 +750,10 @@ class DelayCorrelationAnalyzer:
                 corr, tf, p, ts = result
                 if not np.isnan(corr):
                     valid_results.append((corr, tf, p, ts, None))
+            else:
+                # 处理异常格式，记录日志并跳过
+                logger.warning(f"结果格式异常，跳过 | 币种: {coin} | 结果长度: {len(result)} | 结果: {result}")
+                continue
 
         valid_results = sorted(valid_results, key=lambda x: x[0], reverse=True)
 
