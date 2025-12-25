@@ -623,7 +623,7 @@ class DelayCorrelationAnalyzer:
         long_term_corrs = [x[0] for x in results if x[2] in long_periods]
         
         if not short_term_corrs or not long_term_corrs:
-            return False, 0
+            return False, 0, 0.0, 0.0
         
         min_short_corr = min(short_term_corrs)
         max_long_corr = max(long_term_corrs)
